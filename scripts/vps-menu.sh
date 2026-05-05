@@ -14,11 +14,9 @@ MENU_LABELS=(
   "重装为 Debian 13"
   "Debian 13 基础初始化 + 校验"
   "Debian 13 基础初始化结果校验"
-  "部署 Headscale 主节点全流程"
-  "生成 Headscale 认证密钥"
-  "接入 Headscale"
-  "部署 k3s 主节点全流程"
-  "部署 k3s 子节点全流程"
+  "部署 Headscale 主节点"
+  "签发 Headscale 接入密钥"
+  "接入 Headscale 网络"
   "部署 k3s 主节点"
   "部署 k3s 子节点"
   "部署 Flux GitOps"
@@ -41,28 +39,24 @@ MENU_GROUPS=(
   "并入集群配置"
   "并入集群配置"
   "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
 )
 MENU_HINTS=(
   "启动 Debian 13 重装"
   "首次配置并立即校验"
   "只读检查当前状态"
-  "系统初始化、部署服务端、本机接入"
-  "生成一次性接入 key"
+  "安装 Headscale、配置 DNS/Caddy、本机接入"
+  "给新节点使用的一次性 key"
   "当前节点加入 hollow-net"
-  "接入 Headscale、部署 server、部署 GitOps"
-  "接入 Headscale、部署 agent"
-  "部署 Kubernetes server"
-  "部署 Kubernetes agent"
-  "安装 GitOps 控制面"
+  "接入网络、部署 server、记录 token、部署 GitOps"
+  "接入网络、部署 agent"
+  "安装 Flux 控制面"
   "输出 worker 接入 token"
-  "加密并上传配置状态"
-  "加密并上传集群状态"
+  "加密并上传 Headscale 状态"
+  "加密并上传 k3s/Flux 状态"
   "返回 shell"
 )
-MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "0")
-MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-authkey" "headscale-client" "k3s-main-node" "k3s-worker-node" "k3s-server" "k3s-agent" "flux-gitops" "k3s-token" "backup-headscale" "backup-k3s" "exit")
+MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "0")
+MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-authkey" "headscale-client" "k3s-main-node" "k3s-worker-node" "flux-gitops" "k3s-token" "backup-headscale" "backup-k3s" "exit")
 
 ITEM_LINES=()
 MENU_END_LINE=1

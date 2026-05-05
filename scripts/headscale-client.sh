@@ -22,6 +22,7 @@ readonly TAILSCALED_OVERRIDE="/etc/systemd/system/tailscaled.service.d/10-hlwdot
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
 HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-}"
+HEADSCALE_SERVER_HOSTNAME="${HEADSCALE_SERVER_HOSTNAME:-}"
 HEADSCALE_AUTHKEY="${HEADSCALE_AUTHKEY:-}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
 HEADSCALE_ACCEPT_DNS="${HEADSCALE_ACCEPT_DNS:-true}"
@@ -60,6 +61,23 @@ validate_input() {
   validate_bool HEADSCALE_ADVERTISE_EXIT_NODE "$HEADSCALE_ADVERTISE_EXIT_NODE"
   validate_bool HEADSCALE_ENABLE_TS_SSH "$HEADSCALE_ENABLE_TS_SSH"
   validate_bool HEADSCALE_RESET "$HEADSCALE_RESET"
+}
+
+resolve_server_url() {
+  local host
+
+  case "$HEADSCALE_SERVER_URL" in
+    '' | auto | https://headscale.example.com | http://headscale.example.com)
+      if [[ -n "$HEADSCALE_SERVER_HOSTNAME" ]]; then
+        host="$HEADSCALE_SERVER_HOSTNAME"
+      elif [[ -n "${CLOUDFLARE_ZONE:-}" ]]; then
+        host="headscale.${CLOUDFLARE_ZONE%.}"
+      else
+        die "HEADSCALE_SERVER_URL=auto 时需要设置 HEADSCALE_SERVER_HOSTNAME 或 CLOUDFLARE_ZONE。"
+      fi
+      HEADSCALE_SERVER_URL="https://${host}"
+      ;;
+  esac
 }
 
 apply_defaults() {
@@ -196,6 +214,7 @@ main() {
   install_traps
   load_env
   recover_previous_run
+  resolve_server_url
   apply_defaults
   validate_input
   begin_run

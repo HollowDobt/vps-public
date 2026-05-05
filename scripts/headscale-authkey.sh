@@ -67,14 +67,26 @@ create_key() {
   local key
 
   user_ref="$(headscale_user_id || true)"
-  [[ -n "$user_ref" ]] || user_ref="$HEADSCALE_USER"
-  args=(preauthkeys create --user "$user_ref" --expiration "$HEADSCALE_PREAUTH_EXPIRATION")
+  if [[ -n "$user_ref" ]]; then
+    args=(preauthkeys create --user "$user_ref" --expiration "$HEADSCALE_PREAUTH_EXPIRATION")
+  else
+    args=(preauthkeys create --expiration "$HEADSCALE_PREAUTH_EXPIRATION")
+  fi
   [[ "$HEADSCALE_PREAUTH_REUSABLE" == "1" ]] && args+=(--reusable)
 
   printf '\n新认证密钥：\n'
+  if command_exists jq && output="$(headscale "${args[@]}" -o json 2>/dev/null)"; then
+    key="$(jq -r '.key // .preAuthKey.key // .pre_auth_key.key // empty' <<<"$output")"
+    if [[ -n "$key" && "$key" != "null" ]]; then
+      printf '%s\n' "$key"
+      persist_env_value HEADSCALE_AUTHKEY "$key"
+      return 0
+    fi
+  fi
+
   output="$(headscale "${args[@]}")"
   printf '%s\n' "$output"
-  key="$(grep -Eo 'tskey-[A-Za-z0-9_-]+' <<<"$output" | head -n 1 || true)"
+  key="$(grep -Eo '(hskey-auth|tskey-auth|tskey)-[A-Za-z0-9._=-]+' <<<"$output" | head -n 1 || true)"
   if [[ -n "$key" ]]; then
     persist_env_value HEADSCALE_AUTHKEY "$key"
   else

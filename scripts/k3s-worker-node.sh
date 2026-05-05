@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# k3s 子节点全流程部署脚本。
+# k3s 子节点部署脚本。
 #
 # 适合普通工作节点使用。脚本先完成系统初始化和 Headscale 接入，
 # 再用主节点提供的地址与 token 接入 k3s 集群。
@@ -113,7 +113,7 @@ main() {
   run_child "部署 k3s 子节点" "$(script_path k3s-agent.sh)"
 
   finish_run
-  printf '\nk3s 子节点全流程完成。\n'
+  printf '\nk3s 子节点部署完成。\n'
   printf '  配置文件：/etc/hlwdot/vps.env\n'
 }
 

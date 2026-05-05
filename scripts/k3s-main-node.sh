@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# k3s 主节点全流程部署脚本。
+# k3s 主节点部署脚本。
 #
 # 适合 Kubernetes 控制节点使用。脚本先完成系统初始化和 Headscale 接入，
 # 再部署 k3s server，最后按配置部署 Flux GitOps。
@@ -120,7 +120,7 @@ main() {
   fi
 
   finish_run
-  printf '\nk3s 主节点全流程完成。\n'
+  printf '\nk3s 主节点部署完成。\n'
   printf '  配置文件：/etc/hlwdot/vps.env\n'
 }
 

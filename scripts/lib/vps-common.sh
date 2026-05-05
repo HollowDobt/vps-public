@@ -155,10 +155,10 @@ load_env() {
         . "$filtered_env"
         set +a
       else
-      set -a
-      # shellcheck disable=SC1090
-      . "$candidate"
-      set +a
+        set -a
+        # shellcheck disable=SC1090
+        . "$candidate"
+        set +a
       fi
       ENV_SOURCE="$candidate"
       ENV_SOURCES+=("$candidate")
@@ -222,12 +222,15 @@ persist_env_value() {
   local key="$1"
   local value="$2"
   local target="/etc/hlwdot/vps.env"
+  local local_env="${SCRIPT_DIR}/.env"
 
   [[ -n "$key" ]] || return 0
   ensure_system_env_file
   persist_env_value_to_file "$target" "$key" "$value"
   if [[ -n "${VPS_ENV_FILE:-}" && "$VPS_ENV_FILE" != "$target" && -e "$VPS_ENV_FILE" ]]; then
     persist_env_value_to_file "$VPS_ENV_FILE" "$key" "$value"
+  elif [[ -e "$local_env" && "$local_env" != "$target" ]]; then
+    persist_env_value_to_file "$local_env" "$key" "$value"
   fi
   printf -v "$key" '%s' "$value"
   export "$key"

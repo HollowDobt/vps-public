@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Headscale 主节点全流程部署脚本。
+# Headscale 主节点部署脚本。
 #
 # 适合第一台 VPN 控制节点使用。脚本按顺序执行 Debian 基础初始化、
 # 初始化校验、Headscale 服务端部署、认证密钥生成和本机接入。
@@ -158,7 +158,7 @@ main() {
   fi
 
   finish_run
-  printf '\nHeadscale 主节点全流程完成。\n'
+  printf '\nHeadscale 主节点部署完成。\n'
   printf '  server_url：%s\n' "$HEADSCALE_SERVER_URL"
   printf '  配置文件：/etc/hlwdot/vps.env\n'
 }
