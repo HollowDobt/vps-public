@@ -3,7 +3,7 @@
 #
 # 这个脚本只负责“新系统装好之后”的基础初始化，不负责重装系统、
 # 分区、格式化磁盘或迁移业务数据。默认目标是把一台干净的 Debian 13
-# VPS 配置成可以用 hollow 登录、具备基础安全防护、具备 swapfile、
+# VPS 配置成可以用 hollow 登录、具备基础安全防护、具备 BBR、swapfile、
 # 并且可以在被 Ctrl-C 中断后重新执行。
 #
 # 推荐运行方式：
@@ -40,6 +40,8 @@ readonly SSHD_DROPIN_HAD_BACKUP="${STATE_DIR}/sshd-dropin.had-backup"
 readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/10-hlwdot-bootstrap.conf"
 readonly FAIL2BAN_JAIL="/etc/fail2ban/jail.d/10-hlwdot-sshd.conf"
 readonly APT_AUTO_UPGRADES="/etc/apt/apt.conf.d/20auto-upgrades"
+readonly MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
+readonly SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
 
 # 默认值尽量贴合新 VPS 的基础使用场景：hollow 是主账号，SSH 端口默认 22。
 # 只有找到可用登录密钥并写入 root 与 hollow 后，才会启用仅密钥 SSH 登录策略。
@@ -55,6 +57,7 @@ BOOTSTRAP_ENABLE_UFW="${BOOTSTRAP_ENABLE_UFW:-1}"
 BOOTSTRAP_ENABLE_FAIL2BAN="${BOOTSTRAP_ENABLE_FAIL2BAN:-1}"
 BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES="${BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES:-1}"
 BOOTSTRAP_FULL_UPGRADE="${BOOTSTRAP_FULL_UPGRADE:-1}"
+BOOTSTRAP_ENABLE_BBR="${BOOTSTRAP_ENABLE_BBR:-1}"
 BOOTSTRAP_AUTHORIZED_KEYS_SOURCE="${BOOTSTRAP_AUTHORIZED_KEYS_SOURCE:-/root/.ssh/authorized_keys}"
 BOOTSTRAP_AUTHORIZED_KEYS="${BOOTSTRAP_AUTHORIZED_KEYS:-}"
 BOOTSTRAP_USER_PASSWORD_HASH="${BOOTSTRAP_USER_PASSWORD_HASH:-}"
@@ -68,6 +71,7 @@ BOOTSTRAP_SWAP_SIZE="${BOOTSTRAP_SWAP_SIZE:-auto}"            # auto、0、1024M
 
 AUTHORIZED_KEYS_INSTALLED=0
 SSH_LOCKDOWN_ACTIVE=0
+BBR_CONFIGURED=0
 TEMP_FILES=()
 
 APT_GET=(
@@ -186,6 +190,7 @@ usage() {
   BOOTSTRAP_ENABLE_FAIL2BAN=1
   BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1
   BOOTSTRAP_FULL_UPGRADE=1
+  BOOTSTRAP_ENABLE_BBR=1
   BOOTSTRAP_AUTHORIZED_KEYS_SOURCE=/root/.ssh/authorized_keys
   BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...'
   BOOTSTRAP_USER_PASSWORD_HASH='\$y\$...'
@@ -257,6 +262,7 @@ validate_input() {
   validate_bool BOOTSTRAP_ENABLE_FAIL2BAN "$BOOTSTRAP_ENABLE_FAIL2BAN"
   validate_bool BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES "$BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES"
   validate_bool BOOTSTRAP_FULL_UPGRADE "$BOOTSTRAP_FULL_UPGRADE"
+  validate_bool BOOTSTRAP_ENABLE_BBR "$BOOTSTRAP_ENABLE_BBR"
   validate_bool BOOTSTRAP_ENABLE_SWAP "$BOOTSTRAP_ENABLE_SWAP"
 }
 
@@ -410,6 +416,7 @@ run_apt() {
     gnupg
     htop
     jq
+    kmod
     locales
     lsb-release
     openssh-server
@@ -777,6 +784,41 @@ configure_unattended_upgrades() {
   systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
 }
 
+configure_bbr() {
+  local temp_modules
+  local temp_conf
+
+  [[ "$BOOTSTRAP_ENABLE_BBR" == "1" ]] || return 0
+
+  # Debian 13 内核通常已经提供 tcp_bbr，但干净系统不一定已经加载模块。
+  # 先加载模块并写入开机加载配置，再设置拥塞控制和默认队列规则。
+  if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    if ! modprobe tcp_bbr 2>/dev/null; then
+      warn "当前内核无法加载 tcp_bbr，跳过 BBR 配置。"
+      return 0
+    fi
+  fi
+
+  if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    warn "tcp_bbr 已尝试加载，但内核仍未列出 bbr，跳过 BBR 配置。"
+    return 0
+  fi
+
+  log "配置 TCP BBR。"
+  temp_modules="$(mktemp_managed)"
+  temp_conf="$(mktemp_managed)"
+  printf 'tcp_bbr\n' >"$temp_modules"
+  {
+    printf 'net.core.default_qdisc = fq\n'
+    printf 'net.ipv4.tcp_congestion_control = bbr\n'
+  } >"$temp_conf"
+
+  atomic_install_file "$temp_modules" "$MODULES_BBR" 0644 root root
+  atomic_install_file "$temp_conf" "$SYSCTL_BBR" 0644 root root
+  sysctl -p "$SYSCTL_BBR" >/dev/null
+  BBR_CONFIGURED=1
+}
+
 choose_auto_swap_size_mb() {
   local mem_kb
   local mem_mb
@@ -925,6 +967,7 @@ write_done_marker() {
     printf 'ssh_lockdown=%s\n' "$SSH_LOCKDOWN_ACTIVE"
     printf 'ufw=%s\n' "$BOOTSTRAP_ENABLE_UFW"
     printf 'fail2ban=%s\n' "$BOOTSTRAP_ENABLE_FAIL2BAN"
+    printf 'bbr=%s\n' "$BBR_CONFIGURED"
     printf 'swapfile=%s\n' "$BOOTSTRAP_SWAPFILE"
   } >"$DONE_MARKER"
   chmod 0644 "$DONE_MARKER"
@@ -939,6 +982,7 @@ print_summary() {
   printf '  SSH 允许用户：%s\n' "$([[ "$SSH_LOCKDOWN_ACTIVE" == "1" ]] && printf 'root hollow' || printf '未限定')"
   printf '  UFW：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_UFW")"
   printf '  fail2ban：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_FAIL2BAN")"
+  printf '  BBR：%s\n' "$(configured_label "$BBR_CONFIGURED")"
   printf '  swapfile：%s\n' "$BOOTSTRAP_SWAPFILE"
   printf '  状态文件：%s\n' "$DONE_MARKER"
 
@@ -979,6 +1023,7 @@ main() {
   configure_sshd
   configure_fail2ban
   configure_unattended_upgrades
+  configure_bbr
   configure_swapfile
   enable_core_services
   cleanup_apt

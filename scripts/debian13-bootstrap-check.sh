@@ -4,7 +4,7 @@
 # 本脚本只读取系统状态，不修改配置、不创建状态文件、不尝试修复问题。
 # 校验目标与 debian13-bootstrap.sh 保持一致：系统版本、hollow 用户、
 # SSH、sudo、UFW、fail2ban、自动安全更新、chrony、locale、timezone、
-# swapfile、受管状态文件和中断恢复标记。
+# BBR、swapfile、受管状态文件和中断恢复标记。
 #
 # 推荐运行方式：
 #   sudo bash scripts/debian13-bootstrap-check.sh
@@ -26,6 +26,8 @@ readonly SSHD_CHANGE_IN_PROGRESS="${STATE_DIR}/sshd-change.in-progress"
 readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/10-hlwdot-bootstrap.conf"
 readonly FAIL2BAN_JAIL="/etc/fail2ban/jail.d/10-hlwdot-sshd.conf"
 readonly APT_AUTO_UPGRADES="/etc/apt/apt.conf.d/20auto-upgrades"
+readonly MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
+readonly SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
 
 STATUS_LIST=()
 ITEM_LIST=()
@@ -63,6 +65,7 @@ MARKER_SWAPFILE="$(marker_value swapfile 2>/dev/null || true)"
 MARKER_UFW="$(marker_value ufw 2>/dev/null || true)"
 MARKER_FAIL2BAN="$(marker_value fail2ban 2>/dev/null || true)"
 MARKER_SSH_LOCKDOWN="$(marker_value ssh_lockdown 2>/dev/null || true)"
+MARKER_BBR="$(marker_value bbr 2>/dev/null || true)"
 
 VERIFY_USER="${VERIFY_USER:-${BOOTSTRAP_USER:-${MARKER_USER:-hollow}}}"
 VERIFY_TIMEZONE="${VERIFY_TIMEZONE:-${BOOTSTRAP_TIMEZONE:-Asia/Shanghai}}"
@@ -74,6 +77,7 @@ VERIFY_SUDO_NOPASSWD="${VERIFY_SUDO_NOPASSWD:-${BOOTSTRAP_SUDO_NOPASSWD:-auto}}"
 VERIFY_ENABLE_UFW="${VERIFY_ENABLE_UFW:-${BOOTSTRAP_ENABLE_UFW:-${MARKER_UFW:-1}}}"
 VERIFY_ENABLE_FAIL2BAN="${VERIFY_ENABLE_FAIL2BAN:-${BOOTSTRAP_ENABLE_FAIL2BAN:-${MARKER_FAIL2BAN:-1}}}"
 VERIFY_ENABLE_UNATTENDED_UPGRADES="${VERIFY_ENABLE_UNATTENDED_UPGRADES:-${BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES:-1}}"
+VERIFY_ENABLE_BBR="${VERIFY_ENABLE_BBR:-${BOOTSTRAP_ENABLE_BBR:-${MARKER_BBR:-1}}}"
 VERIFY_ENABLE_SWAP="${VERIFY_ENABLE_SWAP:-${BOOTSTRAP_ENABLE_SWAP:-1}}"
 VERIFY_SWAPFILE="${VERIFY_SWAPFILE:-${BOOTSTRAP_SWAPFILE:-${MARKER_SWAPFILE:-/swapfile}}}"
 VERIFY_SWAP_SIZE="${VERIFY_SWAP_SIZE:-${BOOTSTRAP_SWAP_SIZE:-auto}}"
@@ -94,13 +98,14 @@ usage() {
   VERIFY_ENABLE_UFW=1
   VERIFY_ENABLE_FAIL2BAN=1
   VERIFY_ENABLE_UNATTENDED_UPGRADES=1
+  VERIFY_ENABLE_BBR=1
   VERIFY_ENABLE_SWAP=1
   VERIFY_SWAPFILE=/swapfile
   VERIFY_SWAP_SIZE=auto                 # auto、0、1024M、2G
 
 说明：
   - 只读校验，不修复、不写入系统配置。
-  - 默认读取 bootstrap 完成标记中的用户、swapfile、UFW、fail2ban 和 SSH 策略。
+  - 默认读取 bootstrap 完成标记中的用户、swapfile、UFW、fail2ban、BBR 和 SSH 策略。
   - 有 FAIL 时退出码为 1；无 FAIL 但有 WARN 时退出码为 2；全部通过时退出码为 0。
 EOF
 }
@@ -354,6 +359,12 @@ fstab_has_swap_entry() {
   ' /etc/fstab
 }
 
+sysctl_value() {
+  local key="$1"
+
+  sysctl -n "$key" 2>/dev/null || true
+}
+
 check_runtime_context() {
   if is_root; then
     add_result OK "运行权限" "root；可读取全部受限配置"
@@ -402,7 +413,7 @@ check_package_state() {
   local missing=()
   local packages=(
     bash-completion ca-certificates chrony curl fail2ban file git gnupg htop jq
-    locales lsb-release openssh-server rsync sudo tar tmux tzdata ufw
+    kmod locales lsb-release openssh-server rsync sudo tar tmux tzdata ufw
     unattended-upgrades unzip vim wget zip
   )
   local pkg
@@ -700,6 +711,46 @@ check_time_locale() {
   fi
 }
 
+check_bbr() {
+  local available
+  local qdisc
+  local congestion
+
+  if ! bool_enabled "$VERIFY_ENABLE_BBR"; then
+    add_result SKIP "BBR" "当前期望为停用"
+    return
+  fi
+
+  available="$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || true)"
+  if grep -qw bbr <<<"$available"; then
+    add_result OK "BBR 内核支持" "$available"
+  else
+    add_result FAIL "BBR 内核支持" "tcp_available_congestion_control=${available:-unknown}"
+  fi
+
+  if [[ -r "$MODULES_BBR" ]] && grep -qx 'tcp_bbr' "$MODULES_BBR"; then
+    add_result OK "BBR 模块配置" "$MODULES_BBR"
+  else
+    add_result FAIL "BBR 模块配置" "缺少或内容不符合预期：$MODULES_BBR"
+  fi
+
+  if [[ -r "$SYSCTL_BBR" ]] &&
+    grep -qx 'net.core.default_qdisc = fq' "$SYSCTL_BBR" &&
+    grep -qx 'net.ipv4.tcp_congestion_control = bbr' "$SYSCTL_BBR"; then
+    add_result OK "BBR 配置" "$SYSCTL_BBR"
+  else
+    add_result FAIL "BBR 配置" "缺少或内容不符合预期：$SYSCTL_BBR"
+  fi
+
+  qdisc="$(sysctl_value net.core.default_qdisc)"
+  congestion="$(sysctl_value net.ipv4.tcp_congestion_control)"
+  if [[ "$qdisc" == "fq" && "$congestion" == "bbr" ]]; then
+    add_result OK "BBR 运行状态" "default_qdisc=fq；tcp_congestion_control=bbr"
+  else
+    add_result FAIL "BBR 运行状态" "default_qdisc=${qdisc:-unknown}；tcp_congestion_control=${congestion:-unknown}"
+  fi
+}
+
 check_swap() {
   local expected_mb
   local active_bytes
@@ -841,6 +892,7 @@ main() {
   check_fail2ban
   check_unattended_upgrades
   check_time_locale
+  check_bbr
   check_swap
   check_hostname
   print_table
