@@ -25,6 +25,7 @@ HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-}"
 HEADSCALE_LISTEN_ADDR="${HEADSCALE_LISTEN_ADDR:-127.0.0.1:8080}"
 HEADSCALE_METRICS_LISTEN_ADDR="${HEADSCALE_METRICS_LISTEN_ADDR:-127.0.0.1:9090}"
 HEADSCALE_GRPC_LISTEN_ADDR="${HEADSCALE_GRPC_LISTEN_ADDR:-127.0.0.1:50443}"
+HEADSCALE_DNS_BASE_DOMAIN="${HEADSCALE_DNS_BASE_DOMAIN:-auto}"
 HEADSCALE_USER="${HEADSCALE_USER:-hollow}"
 HEADSCALE_CREATE_PREAUTHKEY="${HEADSCALE_CREATE_PREAUTHKEY:-0}"
 HEADSCALE_PREAUTH_REUSABLE="${HEADSCALE_PREAUTH_REUSABLE:-0}"
@@ -55,6 +56,7 @@ usage() {
 常用变量：
   HEADSCALE_VERSION=stable
   HEADSCALE_LISTEN_ADDR=127.0.0.1:8080
+  HEADSCALE_DNS_BASE_DOMAIN=auto
   HEADSCALE_USER=hollow
   HEADSCALE_ENABLE_CADDY=auto
   HEADSCALE_CREATE_PREAUTHKEY=0
@@ -102,11 +104,28 @@ auto_headscale_host() {
 resolve_defaults() {
   local host
   local scheme
+  local parent_domain
 
   case "$HEADSCALE_SERVER_URL" in
     '' | auto | https://headscale.example.com | http://headscale.example.com)
       host="$(auto_headscale_host)"
       HEADSCALE_SERVER_URL="https://${host}"
+      ;;
+  esac
+
+  case "$HEADSCALE_DNS_BASE_DOMAIN" in
+    '' | auto | example.com)
+      if [[ -n "${CLOUDFLARE_ZONE:-}" ]]; then
+        HEADSCALE_DNS_BASE_DOMAIN="hollow.${CLOUDFLARE_ZONE%.}"
+      else
+        host="$(url_host "$HEADSCALE_SERVER_URL")"
+        parent_domain="${host#*.}"
+        if [[ "$parent_domain" == "$host" || -z "$parent_domain" ]]; then
+          HEADSCALE_DNS_BASE_DOMAIN="hollow.internal"
+        else
+          HEADSCALE_DNS_BASE_DOMAIN="hollow.${parent_domain}"
+        fi
+      fi
       ;;
   esac
 
@@ -134,6 +153,8 @@ validate_input() {
   if [[ "$CLOUDFLARE_HEADSCALE_DNS" == "1" && "$CLOUDFLARE_DNS_PROXIED" == "1" ]]; then
     die "Headscale DNS 记录不能开启 Cloudflare 代理，请设置 CLOUDFLARE_DNS_PROXIED=0。"
   fi
+  [[ "$HEADSCALE_DNS_BASE_DOMAIN" == *.* ]] || die "HEADSCALE_DNS_BASE_DOMAIN 必须是 FQDN。"
+  [[ "$HEADSCALE_DNS_BASE_DOMAIN" != "$(url_host "$HEADSCALE_SERVER_URL")" ]] || die "HEADSCALE_DNS_BASE_DOMAIN 不能与 HEADSCALE_SERVER_URL 的域名相同。"
   validate_backup_config
 }
 
@@ -142,6 +163,7 @@ persist_headscale_config() {
   persist_env_value HEADSCALE_LISTEN_ADDR "$HEADSCALE_LISTEN_ADDR"
   persist_env_value HEADSCALE_METRICS_LISTEN_ADDR "$HEADSCALE_METRICS_LISTEN_ADDR"
   persist_env_value HEADSCALE_GRPC_LISTEN_ADDR "$HEADSCALE_GRPC_LISTEN_ADDR"
+  persist_env_value HEADSCALE_DNS_BASE_DOMAIN "$HEADSCALE_DNS_BASE_DOMAIN"
   persist_env_value HEADSCALE_USER "$HEADSCALE_USER"
   persist_env_value HEADSCALE_ENABLE_CADDY "$HEADSCALE_ENABLE_CADDY"
 }
@@ -211,6 +233,42 @@ set_yaml_key() {
   atomic_install_file "$temp_file" "$file" 0640 root headscale
 }
 
+set_dns_base_domain() {
+  local file="$1"
+  local value="$2"
+  local temp_file
+
+  temp_file="$(mktemp_managed)"
+  awk -v value="$value" '
+    BEGIN { in_dns = 0; done = 0 }
+    /^dns:[[:space:]]*$/ {
+      in_dns = 1
+      print
+      next
+    }
+    in_dns && /^[^[:space:]#][^:]*:/ {
+      if (!done) {
+        print "  base_domain: " value
+        done = 1
+      }
+      in_dns = 0
+    }
+    in_dns && /^[[:space:]]+base_domain:/ {
+      print "  base_domain: " value
+      done = 1
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print "dns:"
+        print "  base_domain: " value
+      }
+    }
+  ' "$file" >"$temp_file"
+  atomic_install_file "$temp_file" "$file" 0640 root headscale
+}
+
 download_config_example_if_needed() {
   local version
   local temp_config
@@ -265,6 +323,7 @@ configure_headscale() {
   set_yaml_key "$HEADSCALE_CONFIG" listen_addr "$quoted_listen"
   set_yaml_key "$HEADSCALE_CONFIG" metrics_listen_addr "$quoted_metrics"
   set_yaml_key "$HEADSCALE_CONFIG" grpc_listen_addr "$quoted_grpc"
+  set_dns_base_domain "$HEADSCALE_CONFIG" "$HEADSCALE_DNS_BASE_DOMAIN"
   append_config_fragment
 
   headscale configtest

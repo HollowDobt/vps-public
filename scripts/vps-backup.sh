@@ -116,7 +116,8 @@ collect_headscale() {
   tar_paths "$PLAIN_ARCHIVE" \
     etc/hlwdot \
     etc/headscale \
-    var/lib/headscale
+    var/lib/headscale \
+    var/lib/tailscale
   tar -C "$WORK_DIR" --append -f "$PLAIN_ARCHIVE" metadata
 }
 
@@ -139,6 +140,7 @@ collect_k3s() {
     etc/hlwdot \
     etc/fluxcd \
     etc/rancher/k3s \
+    var/lib/tailscale \
     var/lib/rancher/k3s/server
   tar -C "$WORK_DIR" --append -f "$PLAIN_ARCHIVE" metadata k3s-etcd-snapshots
 }
