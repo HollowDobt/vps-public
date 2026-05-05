@@ -116,14 +116,14 @@ resolve_defaults() {
   case "$HEADSCALE_DNS_BASE_DOMAIN" in
     '' | auto | example.com)
       if [[ -n "${CLOUDFLARE_ZONE:-}" ]]; then
-        HEADSCALE_DNS_BASE_DOMAIN="hollow.${CLOUDFLARE_ZONE%.}"
+        HEADSCALE_DNS_BASE_DOMAIN="net.${CLOUDFLARE_ZONE%.}"
       else
         host="$(url_host "$HEADSCALE_SERVER_URL")"
         parent_domain="${host#*.}"
         if [[ "$parent_domain" == "$host" || -z "$parent_domain" ]]; then
-          HEADSCALE_DNS_BASE_DOMAIN="hollow.internal"
+          HEADSCALE_DNS_BASE_DOMAIN="net.internal"
         else
-          HEADSCALE_DNS_BASE_DOMAIN="hollow.${parent_domain}"
+          HEADSCALE_DNS_BASE_DOMAIN="net.${parent_domain}"
         fi
       fi
       ;;
