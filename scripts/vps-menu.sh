@@ -14,10 +14,52 @@ MENU_LABELS=(
   "重装为 Debian 13"
   "Debian 13 基础初始化 + 校验"
   "Debian 13 基础初始化结果校验"
+  "配置 Cloudflare DNS"
+  "部署 Headscale 主节点"
+  "生成 Headscale 认证密钥"
+  "接入 Headscale"
+  "部署 k3s 主节点"
+  "查看 k3s 节点 token"
+  "部署 k3s 子节点"
+  "Headscale 主节点备份"
+  "k3s 主节点备份"
   "退出"
 )
-MENU_KEYS=("1" "2" "3" "0")
-MENU_ACTIONS=("reinstall" "bootstrap" "check" "exit")
+MENU_GROUPS=(
+  "系统重装"
+  "初始化配置"
+  "初始化配置"
+  "初始化配置"
+  "初始化配置"
+  "并入集群配置"
+  "并入集群配置"
+  "并入集群配置"
+  "并入集群配置"
+  "并入集群配置"
+  "并入集群配置"
+  "并入集群配置"
+  "并入集群配置"
+)
+MENU_HINTS=(
+  "启动 Debian 13 重装"
+  "首次配置并立即校验"
+  "只读检查当前状态"
+  "写入 DNS 解析记录"
+  "安装控制面服务"
+  "生成一次性接入 key"
+  "当前节点加入 hollow-net"
+  "部署 Kubernetes server"
+  "输出 worker 接入 token"
+  "部署 Kubernetes agent"
+  "加密并上传配置状态"
+  "加密并上传集群状态"
+  "返回 shell"
+)
+MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "0")
+MENU_ACTIONS=("reinstall" "bootstrap" "check" "cloudflare-dns" "headscale-server" "headscale-authkey" "headscale-client" "k3s-server" "k3s-token" "k3s-agent" "backup-headscale" "backup-k3s" "exit")
+
+ITEM_LINES=()
+MENU_END_LINE=1
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'
@@ -43,11 +85,31 @@ log_error() {
   printf '%s[%s] 错误：%s%s\n' "$C_RED" "$SCRIPT_NAME" "$*" "$C_RESET" >&2
 }
 
+cursor_hide() {
+  printf '\033[?25l'
+}
+
+cursor_show() {
+  printf '\033[?25h\033[0m'
+}
+
+cleanup_terminal() {
+  cursor_show
+}
+
 need_tty() {
   [[ -t 0 && -t 1 ]] || {
     log_error "需要交互式终端。通过 SSH 执行时请使用 ssh -tt root@主机。"
     exit 1
   }
+}
+
+header_rows() {
+  if [[ -r "$HEADER_FILE" ]]; then
+    sed -n '1,40p' "$HEADER_FILE" | wc -l | tr -d ' '
+  else
+    printf '1\n'
+  fi
 }
 
 script_path() {
@@ -56,14 +118,15 @@ script_path() {
 
 run_script() {
   local file="$1"
+  shift || true
 
   [[ -r "$file" ]] || {
     log_error "找不到脚本：$file"
     return 1
   }
 
-  printf '\n%s执行：%s%s\n\n' "$C_DIM" "$file" "$C_RESET"
-  bash "$file"
+  printf '\n%s执行：%s %s%s\n\n' "$C_DIM" "$file" "$*" "$C_RESET"
+  bash "$file" "$@"
 }
 
 run_bootstrap_with_check() {
@@ -94,9 +157,20 @@ confirm_reinstall() {
   [[ "$answer" == "DD" ]]
 }
 
-print_header() {
-  clear 2>/dev/null || true
+confirm_action() {
+  local label="$1"
+  local answer=''
+  local hostname_text
 
+  hostname_text="$(hostname 2>/dev/null || printf 'unknown')"
+  printf '\n准备执行：%s%s%s\n' "$C_BOLD" "$label" "$C_RESET"
+  printf '当前主机：%s%s%s\n' "$C_YELLOW" "$hostname_text" "$C_RESET"
+  printf '输入 %sy%s 确认，直接 Enter 取消：' "$C_BOLD" "$C_RESET"
+  IFS= read -r answer
+  [[ "$answer" == "y" || "$answer" == "Y" ]]
+}
+
+print_header() {
   if [[ -r "$HEADER_FILE" ]]; then
     printf '%s' "$C_CYAN"
     sed -n '1,40p' "$HEADER_FILE"
@@ -108,21 +182,70 @@ print_header() {
   printf '%s%s%s\n\n' "$C_DIM" "$(hostname 2>/dev/null || printf 'unknown')" "$C_RESET"
 }
 
-print_menu() {
+print_item() {
+  local index="$1"
+  local selected="$2"
+
+  if [[ "$selected" == "1" ]]; then
+    printf '  %s%s> %s  %s%s\n' "$C_REV" "$C_BOLD" "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}" "$C_RESET"
+    printf '     %s%s%s\n' "$C_DIM" "${MENU_HINTS[$index]}" "$C_RESET"
+  else
+    printf '    %s  %s\n' "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}"
+    printf '     %s%s%s\n' "$C_DIM" "${MENU_HINTS[$index]}" "$C_RESET"
+  fi
+}
+
+draw_menu() {
   local selected="$1"
   local i
+  local current_group='__none__'
+  local line
 
-  printf '%s↑/↓ 移动，Enter 执行，数字直达，q 退出%s\n\n' "$C_DIM" "$C_RESET"
+  ITEM_LINES=()
+  line=1
+
+  printf '\033[2J\033[H'
+  print_header
+  line=$((line + $(header_rows) + 2))
+
+  printf '%s↑/↓ 移动，Enter 执行，数字/字母直达，q 退出%s\n\n' "$C_DIM" "$C_RESET"
+  line=$((line + 2))
 
   for i in "${!MENU_LABELS[@]}"; do
-    if [[ "$i" == "$selected" ]]; then
-      printf '  %s%s> %-2s %s%s\n' "$C_REV" "$C_BOLD" "${MENU_KEYS[$i]}" "${MENU_LABELS[$i]}" "$C_RESET"
-    else
-      printf '    %-2s %s\n' "${MENU_KEYS[$i]}" "${MENU_LABELS[$i]}"
+    if [[ "${MENU_GROUPS[$i]}" != "$current_group" ]]; then
+      current_group="${MENU_GROUPS[$i]}"
+      printf '  %s%s%s\n' "$C_CYAN" "$current_group" "$C_RESET"
+      line=$((line + 1))
     fi
+    ITEM_LINES[$i]="$line"
+    print_item "$i" "$([[ "$i" == "$selected" ]] && printf 1 || printf 0)"
+    line=$((line + 2))
   done
 
+  MENU_END_LINE="$line"
   printf '\n'
+  printf '\033[%d;1H' "$MENU_END_LINE"
+}
+
+repaint_item() {
+  local index="$1"
+  local selected="$2"
+  local line="${ITEM_LINES[$index]}"
+
+  printf '\033[%d;1H\033[2K' "$line"
+  if [[ "$selected" == "1" ]]; then
+    printf '  %s%s> %s  %s%s' "$C_REV" "$C_BOLD" "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}" "$C_RESET"
+  else
+    printf '    %s  %s' "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}"
+  fi
+
+  printf '\033[%d;1H\033[2K' "$((line + 1))"
+  printf '     %s%s%s' "$C_DIM" "${MENU_HINTS[$index]}" "$C_RESET"
+  printf '\033[%d;1H' "$MENU_END_LINE"
+}
+
+prepare_action_area() {
+  printf '\033[%d;1H\033[J' "$MENU_END_LINE"
 }
 
 pause_return() {
@@ -148,6 +271,10 @@ read_menu_key() {
 run_selected_action() {
   local selected="$1"
   local action="${MENU_ACTIONS[$selected]}"
+  local label="${MENU_LABELS[$selected]}"
+
+  prepare_action_area
+  cursor_show
 
   case "$action" in
     reinstall)
@@ -159,11 +286,102 @@ run_selected_action() {
       pause_return
       ;;
     bootstrap)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
       run_bootstrap_with_check || true
       pause_return
       ;;
     check)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
       run_script "$(script_path debian13-bootstrap-check.sh)" || true
+      pause_return
+      ;;
+    cloudflare-dns)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path cloudflare-dns.sh)" || true
+      pause_return
+      ;;
+    headscale-server)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path headscale-server.sh)" || true
+      pause_return
+      ;;
+    headscale-authkey)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path headscale-authkey.sh)" || true
+      pause_return
+      ;;
+    headscale-client)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path headscale-client.sh)" || true
+      pause_return
+      ;;
+    k3s-server)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path k3s-server.sh)" || true
+      pause_return
+      ;;
+    k3s-token)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path k3s-token.sh)" || true
+      pause_return
+      ;;
+    k3s-agent)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path k3s-agent.sh)" || true
+      pause_return
+      ;;
+    backup-headscale)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path vps-backup.sh)" headscale || true
+      pause_return
+      ;;
+    backup-k3s)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path vps-backup.sh)" k3s || true
       pause_return
       ;;
     exit)
@@ -178,20 +396,31 @@ main() {
   local key=''
   local menu_count="${#MENU_LABELS[@]}"
   local action_status=0
+  local old_selected=0
+  local i
+  local matched=0
 
   need_tty
+  trap cleanup_terminal EXIT
+  trap 'cleanup_terminal; exit 130' INT TERM
+  cursor_hide
+  draw_menu "$selected"
 
   while true; do
-    print_header
-    print_menu "$selected"
     key="$(read_menu_key)" || break
 
     case "$key" in
       $'\e[A' | k | K)
+        old_selected="$selected"
         selected=$(((selected + menu_count - 1) % menu_count))
+        repaint_item "$old_selected" 0
+        repaint_item "$selected" 1
         ;;
       $'\e[B' | j | J)
+        old_selected="$selected"
         selected=$(((selected + 1) % menu_count))
+        repaint_item "$old_selected" 0
+        repaint_item "$selected" 1
         ;;
       '')
         action_status=0
@@ -199,38 +428,39 @@ main() {
         if [[ "$action_status" == "10" ]]; then
           break
         fi
-        ;;
-      1)
-        selected=0
-        action_status=0
-        run_selected_action "$selected" || action_status=$?
-        if [[ "$action_status" == "10" ]]; then
-          break
-        fi
-        ;;
-      2)
-        selected=1
-        action_status=0
-        run_selected_action "$selected" || action_status=$?
-        if [[ "$action_status" == "10" ]]; then
-          break
-        fi
-        ;;
-      3)
-        selected=2
-        action_status=0
-        run_selected_action "$selected" || action_status=$?
-        if [[ "$action_status" == "10" ]]; then
-          break
-        fi
+        cursor_hide
+        draw_menu "$selected"
         ;;
       0 | q | Q)
+        prepare_action_area
         printf '\n%s已退出。%s\n' "$C_GREEN" "$C_RESET"
         break
         ;;
       *)
-        printf '\n%s无效选择。%s\n' "$C_YELLOW" "$C_RESET"
-        pause_return
+        matched=0
+        for i in "${!MENU_KEYS[@]}"; do
+          if [[ "$key" == "${MENU_KEYS[$i]}" || "$key" == "${MENU_KEYS[$i]^^}" ]]; then
+            selected="$i"
+            matched=1
+            break
+          fi
+        done
+        if [[ "$matched" == "1" ]]; then
+          action_status=0
+          run_selected_action "$selected" || action_status=$?
+          if [[ "$action_status" == "10" ]]; then
+            break
+          fi
+          cursor_hide
+          draw_menu "$selected"
+        else
+          prepare_action_area
+          cursor_show
+          printf '\n%s无效选择。%s\n' "$C_YELLOW" "$C_RESET"
+          pause_return
+          cursor_hide
+          draw_menu "$selected"
+        fi
         ;;
     esac
   done
