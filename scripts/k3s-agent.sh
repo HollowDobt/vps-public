@@ -21,6 +21,7 @@ readonly K3S_CONFIG="/etc/rancher/k3s/config.yaml"
 K3S_VERSION="${K3S_VERSION:-}"
 K3S_SERVER_URL="${K3S_SERVER_URL:-}"
 K3S_TOKEN="${K3S_TOKEN:-}"
+K3S_AGENT_TOKEN="${K3S_AGENT_TOKEN:-}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
 K3S_NODE_IP="${K3S_NODE_IP:-}"
 K3S_FLANNEL_IFACE="${K3S_FLANNEL_IFACE:-}"
@@ -37,7 +38,8 @@ usage() {
 
 必填配置：
   K3S_SERVER_URL=https://主节点:6443
-  K3S_TOKEN=主节点 token
+  K3S_AGENT_TOKEN=子节点接入 token
+  或 K3S_TOKEN=共享集群 token
 
 常用配置：
   K3S_NODE_NAME=server-worker-1
@@ -60,7 +62,10 @@ validate_input() {
   fi
   [[ -n "$K3S_SERVER_URL" ]] || die "请设置 K3S_SERVER_URL。"
   [[ "$K3S_SERVER_URL" =~ ^https:// ]] || die "K3S_SERVER_URL 必须以 https:// 开头。"
-  [[ -n "$K3S_TOKEN" ]] || die "请设置 K3S_TOKEN。"
+  if [[ -z "$K3S_TOKEN" && -n "$K3S_AGENT_TOKEN" ]]; then
+    K3S_TOKEN="$K3S_AGENT_TOKEN"
+  fi
+  [[ -n "$K3S_TOKEN" ]] || die "请设置 K3S_TOKEN 或 K3S_AGENT_TOKEN。"
 }
 
 apply_tailnet_defaults() {
@@ -70,6 +75,15 @@ apply_tailnet_defaults() {
   [[ -n "$K3S_NODE_NAME" ]] || K3S_NODE_NAME="${HEADSCALE_CLIENT_HOSTNAME:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'k3s-agent')}"
   [[ -n "$K3S_NODE_IP" ]] || K3S_NODE_IP="$tailnet_ip"
   [[ -n "$K3S_FLANNEL_IFACE" ]] || K3S_FLANNEL_IFACE="$HOLLOW_NET_IFACE"
+}
+
+persist_k3s_agent_config() {
+  persist_env_value K3S_SERVER_URL "$K3S_SERVER_URL"
+  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
+  persist_env_value K3S_NODE_IP "$K3S_NODE_IP"
+  persist_env_value K3S_FLANNEL_IFACE "$K3S_FLANNEL_IFACE"
+  persist_env_value HOLLOW_NET_IFACE "$HOLLOW_NET_IFACE"
+  [[ -n "$K3S_AGENT_TOKEN" ]] && persist_env_value K3S_AGENT_TOKEN "$K3S_AGENT_TOKEN"
 }
 
 write_k3s_config() {
@@ -146,12 +160,16 @@ main() {
   setup_state_dir
   install_traps
   load_env
+  recover_previous_run
   validate_input
-  persist_env_file
   apply_tailnet_defaults
+  begin_run
+  persist_env_file
+  persist_k3s_agent_config
   write_k3s_config
   install_k3s_agent
   print_summary
+  finish_run
 }
 
 main "$@"

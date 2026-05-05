@@ -40,6 +40,7 @@ readonly SSHD_DROPIN_HAD_BACKUP="${STATE_DIR}/sshd-dropin.had-backup"
 readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/10-hlwdot-bootstrap.conf"
 readonly FAIL2BAN_JAIL="/etc/fail2ban/jail.d/10-hlwdot-sshd.conf"
 readonly APT_AUTO_UPGRADES="/etc/apt/apt.conf.d/20auto-upgrades"
+readonly APT_UNATTENDED_UPGRADES="/etc/apt/apt.conf.d/52hlwdot-unattended-upgrades"
 readonly MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
 readonly SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
 
@@ -769,19 +770,37 @@ configure_fail2ban() {
 
 configure_unattended_upgrades() {
   local temp_conf
+  local temp_unattended
+  local codename
 
   [[ "$BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES" == "1" ]] || return 0
 
   log "配置自动安全更新。"
+  codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-trixie}")"
   temp_conf="$(mktemp_managed)"
+  temp_unattended="$(mktemp_managed)"
   {
+    printf 'APT::Periodic::Enable "1";\n'
     printf 'APT::Periodic::Update-Package-Lists "1";\n'
+    printf 'APT::Periodic::Download-Upgradeable-Packages "1";\n'
     printf 'APT::Periodic::Unattended-Upgrade "1";\n'
     printf 'APT::Periodic::AutocleanInterval "7";\n'
   } >"$temp_conf"
+  {
+    printf 'Unattended-Upgrade::Origins-Pattern {\n'
+    printf '  "origin=Debian,codename=%s,label=Debian";\n' "$codename"
+    printf '  "origin=Debian,codename=%s-updates,label=Debian";\n' "$codename"
+    printf '  "origin=Debian,codename=%s-security,label=Debian-Security";\n' "$codename"
+    printf '};\n'
+    printf 'Unattended-Upgrade::Remove-Unused-Dependencies "true";\n'
+    printf 'Unattended-Upgrade::Automatic-Reboot "false";\n'
+    printf 'Unattended-Upgrade::SyslogEnable "true";\n'
+  } >"$temp_unattended"
 
   atomic_install_file "$temp_conf" "$APT_AUTO_UPGRADES" 0644 root root
+  atomic_install_file "$temp_unattended" "$APT_UNATTENDED_UPGRADES" 0644 root root
   systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
+  systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 }
 
 configure_bbr() {

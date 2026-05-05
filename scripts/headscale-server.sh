@@ -20,6 +20,7 @@ readonly HEADSCALE_CONFIG="/etc/headscale/config.yaml"
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
 HEADSCALE_VERSION="${HEADSCALE_VERSION:-stable}"
+HEADSCALE_SERVER_HOSTNAME="${HEADSCALE_SERVER_HOSTNAME:-}"
 HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-}"
 HEADSCALE_LISTEN_ADDR="${HEADSCALE_LISTEN_ADDR:-127.0.0.1:8080}"
 HEADSCALE_METRICS_LISTEN_ADDR="${HEADSCALE_METRICS_LISTEN_ADDR:-127.0.0.1:9090}"
@@ -31,6 +32,10 @@ HEADSCALE_PREAUTH_EXPIRATION="${HEADSCALE_PREAUTH_EXPIRATION:-24h}"
 HEADSCALE_CONFIG_APPEND_FILE="${HEADSCALE_CONFIG_APPEND_FILE:-}"
 HEADSCALE_UFW_ALLOW="${HEADSCALE_UFW_ALLOW:-0}"
 HEADSCALE_UFW_PORTS="${HEADSCALE_UFW_PORTS:-8080/tcp}"
+HEADSCALE_ENABLE_CADDY="${HEADSCALE_ENABLE_CADDY:-auto}"
+HEADSCALE_CADDYFILE="${HEADSCALE_CADDYFILE:-/etc/caddy/Caddyfile}"
+HEADSCALE_CADDY_EMAIL="${HEADSCALE_CADDY_EMAIL:-}"
+HEADSCALE_CADDY_UFW_ALLOW="${HEADSCALE_CADDY_UFW_ALLOW:-1}"
 CLOUDFLARE_HEADSCALE_DNS="${CLOUDFLARE_HEADSCALE_DNS:-1}"
 CLOUDFLARE_DNS_TARGET_IPV4="${CLOUDFLARE_DNS_TARGET_IPV4:-auto}"
 CLOUDFLARE_DNS_PROXIED="${CLOUDFLARE_DNS_PROXIED:-0}"
@@ -42,18 +47,78 @@ usage() {
   sudo bash $SCRIPT_NAME
 
 配置：
-  复制 scripts/.env.example 为 scripts/.env，至少设置：
+  复制 scripts/.env.example 为 scripts/.env，按实际域名设置：
     HEADSCALE_SERVER_URL=https://headscale.example.com
+  也可以设置 HEADSCALE_SERVER_URL=auto，并提供 CLOUDFLARE_ZONE，
+  脚本会使用 headscale.\$CLOUDFLARE_ZONE。
 
 常用变量：
   HEADSCALE_VERSION=stable
   HEADSCALE_LISTEN_ADDR=127.0.0.1:8080
   HEADSCALE_USER=hollow
+  HEADSCALE_ENABLE_CADDY=auto
   HEADSCALE_CREATE_PREAUTHKEY=0
   BACKUP_ENABLE=1
   BACKUP_GPG_EMAILS=you@example.com
   BACKUP_RCLONE_DESTS=remote:path
 EOF
+}
+
+looks_like_ipv4() {
+  [[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]]
+}
+
+url_scheme() {
+  local value="$1"
+
+  printf '%s\n' "${value%%://*}"
+}
+
+listen_port() {
+  local value="$1"
+
+  value="${value##*:}"
+  printf '%s\n' "$value"
+}
+
+auto_headscale_host() {
+  local host
+
+  if [[ -n "$HEADSCALE_SERVER_HOSTNAME" ]]; then
+    printf '%s\n' "$HEADSCALE_SERVER_HOSTNAME"
+    return 0
+  fi
+  if [[ -n "${CLOUDFLARE_ZONE:-}" ]]; then
+    printf 'headscale.%s\n' "${CLOUDFLARE_ZONE%.}"
+    return 0
+  fi
+
+  host="$(hostname -f 2>/dev/null || true)"
+  [[ -n "$host" && "$host" == *.* ]] || host="$(hostname 2>/dev/null || true)"
+  [[ -n "$host" && "$host" == *.* ]] || die "HEADSCALE_SERVER_URL=auto 时需要设置 HEADSCALE_SERVER_HOSTNAME 或 CLOUDFLARE_ZONE。"
+  printf '%s\n' "$host"
+}
+
+resolve_defaults() {
+  local host
+  local scheme
+
+  case "$HEADSCALE_SERVER_URL" in
+    '' | auto | https://headscale.example.com | http://headscale.example.com)
+      host="$(auto_headscale_host)"
+      HEADSCALE_SERVER_URL="https://${host}"
+      ;;
+  esac
+
+  scheme="$(url_scheme "$HEADSCALE_SERVER_URL")"
+  if [[ "$HEADSCALE_ENABLE_CADDY" == "auto" ]]; then
+    host="$(url_host "$HEADSCALE_SERVER_URL")"
+    if [[ "$scheme" == "https" && "$host" != "localhost" && "$host" != "127.0.0.1" ]] && ! looks_like_ipv4 "$host"; then
+      HEADSCALE_ENABLE_CADDY=1
+    else
+      HEADSCALE_ENABLE_CADDY=0
+    fi
+  fi
 }
 
 validate_input() {
@@ -62,9 +127,23 @@ validate_input() {
   validate_bool HEADSCALE_CREATE_PREAUTHKEY "$HEADSCALE_CREATE_PREAUTHKEY"
   validate_bool HEADSCALE_PREAUTH_REUSABLE "$HEADSCALE_PREAUTH_REUSABLE"
   validate_bool HEADSCALE_UFW_ALLOW "$HEADSCALE_UFW_ALLOW"
+  validate_bool HEADSCALE_ENABLE_CADDY "$HEADSCALE_ENABLE_CADDY"
+  validate_bool HEADSCALE_CADDY_UFW_ALLOW "$HEADSCALE_CADDY_UFW_ALLOW"
   validate_bool CLOUDFLARE_HEADSCALE_DNS "$CLOUDFLARE_HEADSCALE_DNS"
   validate_bool CLOUDFLARE_DNS_PROXIED "$CLOUDFLARE_DNS_PROXIED"
+  if [[ "$CLOUDFLARE_HEADSCALE_DNS" == "1" && "$CLOUDFLARE_DNS_PROXIED" == "1" ]]; then
+    die "Headscale DNS 记录不能开启 Cloudflare 代理，请设置 CLOUDFLARE_DNS_PROXIED=0。"
+  fi
   validate_backup_config
+}
+
+persist_headscale_config() {
+  persist_env_value HEADSCALE_SERVER_URL "$HEADSCALE_SERVER_URL"
+  persist_env_value HEADSCALE_LISTEN_ADDR "$HEADSCALE_LISTEN_ADDR"
+  persist_env_value HEADSCALE_METRICS_LISTEN_ADDR "$HEADSCALE_METRICS_LISTEN_ADDR"
+  persist_env_value HEADSCALE_GRPC_LISTEN_ADDR "$HEADSCALE_GRPC_LISTEN_ADDR"
+  persist_env_value HEADSCALE_USER "$HEADSCALE_USER"
+  persist_env_value HEADSCALE_ENABLE_CADDY "$HEADSCALE_ENABLE_CADDY"
 }
 
 debian_arch() {
@@ -193,6 +272,83 @@ configure_headscale() {
   log "Headscale 服务已启动。"
 }
 
+install_caddy_package() {
+  local temp_key
+  local temp_keyring
+  local temp_list
+
+  if command_exists caddy; then
+    log "Caddy 已安装。"
+    return 0
+  fi
+
+  apt_install debian-keyring debian-archive-keyring apt-transport-https ca-certificates curl gnupg
+  temp_key="$(mktemp_managed)"
+  temp_keyring="$(mktemp_managed)"
+  temp_list="$(mktemp_managed)"
+
+  log "配置 Caddy 软件源。"
+  download_file https://dl.cloudsmith.io/public/caddy/stable/gpg.key "$temp_key"
+  rm -f -- "$temp_keyring"
+  gpg --dearmor -o "$temp_keyring" "$temp_key"
+  atomic_install_file "$temp_keyring" /usr/share/keyrings/caddy-stable-archive-keyring.gpg 0644 root root
+
+  download_file https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt "$temp_list"
+  atomic_install_file "$temp_list" /etc/apt/sources.list.d/caddy-stable.list 0644 root root
+  apt_install caddy
+}
+
+headscale_caddy_upstream() {
+  local port
+
+  port="$(listen_port "$HEADSCALE_LISTEN_ADDR")"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "无法从 HEADSCALE_LISTEN_ADDR 解析端口：$HEADSCALE_LISTEN_ADDR"
+  printf '127.0.0.1:%s\n' "$port"
+}
+
+configure_caddy_if_needed() {
+  local host
+  local upstream
+  local temp_file
+
+  [[ "$HEADSCALE_ENABLE_CADDY" == "1" ]] || return 0
+
+  host="$(url_host "$HEADSCALE_SERVER_URL")"
+  [[ -n "$host" ]] || die "无法从 HEADSCALE_SERVER_URL 解析域名。"
+  ! looks_like_ipv4 "$host" || die "HEADSCALE_ENABLE_CADDY=1 时 HEADSCALE_SERVER_URL 必须使用域名。"
+
+  install_caddy_package
+  upstream="$(headscale_caddy_upstream)"
+  temp_file="$(mktemp_managed)"
+
+  if [[ -r "$HEADSCALE_CADDYFILE" ]]; then
+    awk '
+      /^# BEGIN HLWDOT HEADSCALE$/ { skip = 1; next }
+      /^# END HLWDOT HEADSCALE$/ { skip = 0; next }
+      !skip { print }
+    ' "$HEADSCALE_CADDYFILE" >"$temp_file"
+  else
+    : >"$temp_file"
+  fi
+
+  {
+    printf '\n# BEGIN HLWDOT HEADSCALE\n'
+    printf '%s {\n' "$host"
+    if [[ -n "$HEADSCALE_CADDY_EMAIL" ]]; then
+      printf '  tls %s\n' "$HEADSCALE_CADDY_EMAIL"
+    fi
+    printf '  reverse_proxy %s\n' "$upstream"
+    printf '}\n'
+    printf '# END HLWDOT HEADSCALE\n'
+  } >>"$temp_file"
+
+  atomic_install_file "$temp_file" "$HEADSCALE_CADDYFILE" 0644 root root
+  caddy validate --config "$HEADSCALE_CADDYFILE"
+  systemctl enable --now caddy
+  systemctl reload caddy || systemctl restart caddy
+  log "Caddy 反向代理已配置：${host} -> ${upstream}"
+}
+
 ensure_headscale_user() {
   if headscale users list -o json 2>/dev/null | jq -e --arg user "$HEADSCALE_USER" '.[] | select(.name == $user)' >/dev/null 2>&1 ||
     headscale users list 2>/dev/null | awk -v user="$HEADSCALE_USER" '$0 ~ user { found = 1 } END { exit found ? 0 : 1 }'; then
@@ -213,6 +369,8 @@ headscale_user_id() {
 create_preauth_key_if_needed() {
   local args=()
   local user_ref
+  local output
+  local key
 
   [[ "$HEADSCALE_CREATE_PREAUTHKEY" == "1" ]] || return 0
 
@@ -222,19 +380,28 @@ create_preauth_key_if_needed() {
   [[ "$HEADSCALE_PREAUTH_REUSABLE" == "1" ]] && args+=(--reusable)
 
   log "创建 Headscale preauth key。"
-  headscale "${args[@]}"
+  output="$(headscale "${args[@]}")"
+  printf '%s\n' "$output"
+  key="$(grep -Eo 'tskey-[A-Za-z0-9_-]+' <<<"$output" | head -n 1 || true)"
+  [[ -n "$key" ]] && persist_env_value HEADSCALE_AUTHKEY "$key"
 }
 
 configure_ufw() {
   local port
 
-  [[ "$HEADSCALE_UFW_ALLOW" == "1" ]] || return 0
   command_exists ufw || return 0
 
-  while IFS= read -r port; do
-    [[ -n "$port" ]] || continue
-    ufw allow "$port" comment 'headscale'
-  done < <(split_words "$HEADSCALE_UFW_PORTS")
+  if [[ "$HEADSCALE_UFW_ALLOW" == "1" ]]; then
+    while IFS= read -r port; do
+      [[ -n "$port" ]] || continue
+      ufw allow "$port" comment 'headscale'
+    done < <(split_words "$HEADSCALE_UFW_PORTS")
+  fi
+
+  if [[ "$HEADSCALE_ENABLE_CADDY" == "1" && "$HEADSCALE_CADDY_UFW_ALLOW" == "1" ]]; then
+    ufw allow 80/tcp comment 'caddy http'
+    ufw allow 443/tcp comment 'caddy https'
+  fi
 }
 
 configure_cloudflare_dns_if_needed() {
@@ -281,16 +448,22 @@ main() {
   setup_state_dir
   install_traps
   load_env
+  recover_previous_run
+  resolve_defaults
   validate_input
+  begin_run
   persist_env_file
+  persist_headscale_config
   install_headscale_package
   configure_cloudflare_dns_if_needed
   configure_headscale
+  configure_ufw
+  configure_caddy_if_needed
   ensure_headscale_user
   create_preauth_key_if_needed
-  configure_ufw
   install_backup_timer headscale
   print_summary
+  finish_run
 }
 
 main "$@"

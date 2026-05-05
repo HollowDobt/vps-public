@@ -26,6 +26,7 @@ readonly SSHD_CHANGE_IN_PROGRESS="${STATE_DIR}/sshd-change.in-progress"
 readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/10-hlwdot-bootstrap.conf"
 readonly FAIL2BAN_JAIL="/etc/fail2ban/jail.d/10-hlwdot-sshd.conf"
 readonly APT_AUTO_UPGRADES="/etc/apt/apt.conf.d/20auto-upgrades"
+readonly APT_UNATTENDED_UPGRADES="/etc/apt/apt.conf.d/52hlwdot-unattended-upgrades"
 readonly MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
 readonly SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
 
@@ -650,23 +651,48 @@ check_fail2ban() {
 }
 
 check_unattended_upgrades() {
+  local codename=''
+
   if ! bool_enabled "$VERIFY_ENABLE_UNATTENDED_UPGRADES"; then
     add_result SKIP "自动安全更新" "当前期望为停用"
     return
   fi
 
+  if [[ -r /etc/os-release ]]; then
+    codename="$(awk -F= '$1 == "VERSION_CODENAME" { gsub(/"/, "", $2); print $2 }' /etc/os-release)"
+  fi
+  [[ -n "$codename" ]] || codename="trixie"
+
   if [[ -r "$APT_AUTO_UPGRADES" ]] &&
+    grep -qx 'APT::Periodic::Enable "1";' "$APT_AUTO_UPGRADES" &&
     grep -qx 'APT::Periodic::Update-Package-Lists "1";' "$APT_AUTO_UPGRADES" &&
+    grep -qx 'APT::Periodic::Download-Upgradeable-Packages "1";' "$APT_AUTO_UPGRADES" &&
     grep -qx 'APT::Periodic::Unattended-Upgrade "1";' "$APT_AUTO_UPGRADES"; then
     add_result OK "自动安全更新配置" "$APT_AUTO_UPGRADES"
   else
     add_result FAIL "自动安全更新配置" "缺少或内容不符合预期"
   fi
 
+  if [[ -r "$APT_UNATTENDED_UPGRADES" ]] &&
+    grep -qx "  \"origin=Debian,codename=${codename},label=Debian\";" "$APT_UNATTENDED_UPGRADES" &&
+    grep -qx "  \"origin=Debian,codename=${codename}-updates,label=Debian\";" "$APT_UNATTENDED_UPGRADES" &&
+    grep -qx "  \"origin=Debian,codename=${codename}-security,label=Debian-Security\";" "$APT_UNATTENDED_UPGRADES" &&
+    grep -qx 'Unattended-Upgrade::Automatic-Reboot "false";' "$APT_UNATTENDED_UPGRADES"; then
+    add_result OK "自动升级策略" "$APT_UNATTENDED_UPGRADES"
+  else
+    add_result FAIL "自动升级策略" "缺少或内容不符合预期"
+  fi
+
   if service_enabled unattended-upgrades.service; then
     add_result OK "unattended-upgrades enabled" "enabled"
   else
     add_result FAIL "unattended-upgrades enabled" "未启用"
+  fi
+
+  if service_enabled apt-daily.timer && service_enabled apt-daily-upgrade.timer; then
+    add_result OK "apt 自动更新 timer" "apt-daily / apt-daily-upgrade"
+  else
+    add_result FAIL "apt 自动更新 timer" "未启用"
   fi
 }
 

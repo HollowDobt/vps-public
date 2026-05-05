@@ -11,7 +11,10 @@ if [[ -z "${SCRIPT_DIR:-}" ]]; then
 fi
 
 ENV_SOURCE=''
+ENV_SOURCES=()
 TEMP_FILES=()
+RUN_MARKER=''
+DONE_MARKER=''
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -47,6 +50,8 @@ validate_bool() {
 setup_state_dir() {
   install -d -o root -g root -m 0755 "$STATE_DIR"
   install -d -o root -g root -m 0700 "${STATE_DIR}/tmp"
+  RUN_MARKER="${STATE_DIR}/run.in-progress"
+  DONE_MARKER="${STATE_DIR}/done.env"
 }
 
 track_tempfile() {
@@ -69,6 +74,35 @@ cleanup_tempfiles() {
   done
 
   return 0
+}
+
+recover_previous_run() {
+  if [[ -d "${STATE_DIR}/tmp" ]]; then
+    find "${STATE_DIR}/tmp" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+  fi
+
+  if [[ -f "$RUN_MARKER" ]]; then
+    warn "检测到上次运行未完成，已清理本脚本临时文件。本次将重新执行可重复步骤。"
+  fi
+}
+
+begin_run() {
+  install -d -o root -g root -m 0755 "$STATE_DIR"
+  {
+    printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'script=%s\n' "$SCRIPT_NAME"
+    printf 'pid=%s\n' "$$"
+  } >"$RUN_MARKER"
+  chmod 0644 "$RUN_MARKER"
+}
+
+finish_run() {
+  {
+    printf 'completed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'script=%s\n' "$SCRIPT_NAME"
+  } >"$DONE_MARKER"
+  chmod 0644 "$DONE_MARKER"
+  rm -f -- "$RUN_MARKER"
 }
 
 on_interrupt() {
@@ -95,35 +129,109 @@ install_traps() {
 load_env() {
   local candidate
   local candidates=()
+  local loaded=0
+  local sources_text
 
   if [[ -n "${VPS_ENV_FILE:-}" ]]; then
     candidates+=("$VPS_ENV_FILE")
+  else
+    candidates+=("/etc/hlwdot/vps.env" "${SCRIPT_DIR}/.env")
   fi
-  candidates+=("${SCRIPT_DIR}/.env" "/etc/hlwdot/vps.env")
 
   for candidate in "${candidates[@]}"; do
     if [[ -r "$candidate" ]]; then
+      if [[ -z "${VPS_ENV_FILE:-}" && "$candidate" == "${SCRIPT_DIR}/.env" && -r /etc/hlwdot/vps.env ]]; then
+        local filtered_env
+
+        filtered_env="$(mktemp_managed)"
+        awk '
+          /^[[:space:]]*#/ { print; next }
+          /^[[:space:]]*$/ { print; next }
+          /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$/ { next }
+          { print }
+        ' "$candidate" >"$filtered_env"
+        set -a
+        # shellcheck disable=SC1090
+        . "$filtered_env"
+        set +a
+      else
       set -a
       # shellcheck disable=SC1090
       . "$candidate"
       set +a
+      fi
       ENV_SOURCE="$candidate"
-      log "读取配置：$candidate"
-      return 0
+      ENV_SOURCES+=("$candidate")
+      loaded=1
     fi
   done
+
+  if [[ "$loaded" == "1" ]]; then
+    sources_text="$(IFS=', '; printf '%s' "${ENV_SOURCES[*]}")"
+    log "读取配置：$sources_text"
+  fi
 
   return 0
 }
 
 persist_env_file() {
   [[ "${VPS_PERSIST_ENV:-1}" == "1" ]] || return 0
+  [[ -e /etc/hlwdot/vps.env ]] && return 0
   [[ -n "$ENV_SOURCE" && -r "$ENV_SOURCE" ]] || return 0
   [[ "$ENV_SOURCE" != "/etc/hlwdot/vps.env" ]] || return 0
 
   install -d -o root -g root -m 0700 /etc/hlwdot
   install -o root -g root -m 0600 "$ENV_SOURCE" /etc/hlwdot/vps.env
   log "写入系统配置副本：/etc/hlwdot/vps.env"
+}
+
+shell_quote() {
+  local value="$1"
+
+  printf "'"
+  printf '%s' "$value" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+ensure_system_env_file() {
+  install -d -o root -g root -m 0700 /etc/hlwdot
+  if [[ ! -e /etc/hlwdot/vps.env ]]; then
+    if [[ -n "$ENV_SOURCE" && -r "$ENV_SOURCE" ]]; then
+      install -o root -g root -m 0600 "$ENV_SOURCE" /etc/hlwdot/vps.env
+    else
+      install -o root -g root -m 0600 /dev/null /etc/hlwdot/vps.env
+    fi
+  else
+    chmod 0600 /etc/hlwdot/vps.env
+  fi
+}
+
+persist_env_value_to_file() {
+  local target="$1"
+  local key="$2"
+  local value="$3"
+  local temp_file
+
+  temp_file="$(mktemp_managed)"
+  awk -v key="$key" '$0 !~ "^[[:space:]]*" key "=" { print }' "$target" >"$temp_file"
+  printf '%s=%s\n' "$key" "$(shell_quote "$value")" >>"$temp_file"
+  atomic_install_file "$temp_file" "$target" 0600 root root
+}
+
+persist_env_value() {
+  local key="$1"
+  local value="$2"
+  local target="/etc/hlwdot/vps.env"
+
+  [[ -n "$key" ]] || return 0
+  ensure_system_env_file
+  persist_env_value_to_file "$target" "$key" "$value"
+  if [[ -n "${VPS_ENV_FILE:-}" && "$VPS_ENV_FILE" != "$target" && -e "$VPS_ENV_FILE" ]]; then
+    persist_env_value_to_file "$VPS_ENV_FILE" "$key" "$value"
+  fi
+  printf -v "$key" '%s' "$value"
+  export "$key"
+  log "更新系统配置：$key"
 }
 
 atomic_install_file() {

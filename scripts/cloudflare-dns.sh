@@ -46,6 +46,9 @@ validate_input() {
   cloudflare_configured || die "请设置 CLOUDFLARE_API_TOKEN，或同时设置 CLOUDFLARE_EMAIL 与 CLOUDFLARE_API_KEY。"
   validate_bool CLOUDFLARE_DNS_PROXIED "$CLOUDFLARE_DNS_PROXIED"
   validate_bool CLOUDFLARE_HEADSCALE_DNS "$CLOUDFLARE_HEADSCALE_DNS"
+  if [[ "$CLOUDFLARE_HEADSCALE_DNS" == "1" && "$CLOUDFLARE_DNS_PROXIED" == "1" ]]; then
+    die "Headscale DNS 记录不能开启 Cloudflare 代理，请设置 CLOUDFLARE_DNS_PROXIED=0。"
+  fi
   [[ "$CLOUDFLARE_DNS_TTL" =~ ^[0-9]+$ ]] || die "CLOUDFLARE_DNS_TTL 必须是数字。"
 }
 
@@ -111,9 +114,12 @@ main() {
   setup_state_dir
   install_traps
   load_env
+  recover_previous_run
   validate_input
+  begin_run
   apt_install curl jq ca-certificates
   configure_records
+  finish_run
 }
 
 main "$@"

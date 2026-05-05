@@ -114,6 +114,7 @@ collect_headscale() {
   systemctl status headscale --no-pager >"${WORK_DIR}/metadata/headscale-systemd.txt" 2>&1 || true
 
   tar_paths "$PLAIN_ARCHIVE" \
+    etc/hlwdot \
     etc/headscale \
     var/lib/headscale
   tar -C "$WORK_DIR" --append -f "$PLAIN_ARCHIVE" metadata
@@ -135,6 +136,8 @@ collect_k3s() {
   systemctl status k3s --no-pager >"${WORK_DIR}/metadata/k3s-systemd.txt" 2>&1 || true
 
   tar_paths "$PLAIN_ARCHIVE" \
+    etc/hlwdot \
+    etc/fluxcd \
     etc/rancher/k3s \
     var/lib/rancher/k3s/server
   tar -C "$WORK_DIR" --append -f "$PLAIN_ARCHIVE" metadata k3s-etcd-snapshots
@@ -226,11 +229,13 @@ main() {
   setup_state_dir
   install_traps
   load_env
+  recover_previous_run
 
   BACKUP_ENABLE="${BACKUP_ENABLE:-0}"
   BACKUP_LOCAL_DIR="${BACKUP_LOCAL_DIR:-/var/backups/hlwdot}"
   validate_backup_config
   [[ "$BACKUP_ENABLE" == "1" ]] || die "备份未启用：BACKUP_ENABLE=0"
+  begin_run
 
   import_backup_public_key
   prepare_workdir
@@ -246,6 +251,7 @@ main() {
   prune_local_backups
 
   log "备份完成：$ENCRYPTED_ARCHIVE"
+  finish_run
 }
 
 main "$@"

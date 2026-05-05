@@ -63,6 +63,8 @@ headscale_user_id() {
 create_key() {
   local args=()
   local user_ref
+  local output
+  local key
 
   user_ref="$(headscale_user_id || true)"
   [[ -n "$user_ref" ]] || user_ref="$HEADSCALE_USER"
@@ -70,7 +72,14 @@ create_key() {
   [[ "$HEADSCALE_PREAUTH_REUSABLE" == "1" ]] && args+=(--reusable)
 
   printf '\n新认证密钥：\n'
-  headscale "${args[@]}"
+  output="$(headscale "${args[@]}")"
+  printf '%s\n' "$output"
+  key="$(grep -Eo 'tskey-[A-Za-z0-9_-]+' <<<"$output" | head -n 1 || true)"
+  if [[ -n "$key" ]]; then
+    persist_env_value HEADSCALE_AUTHKEY "$key"
+  else
+    warn "未能从输出中解析认证密钥，请手工复制上方输出。"
+  fi
 }
 
 main() {
@@ -91,9 +100,14 @@ main() {
   setup_state_dir
   install_traps
   load_env
+  recover_previous_run
+  begin_run
+  persist_env_file
   validate_input
+  persist_env_value HEADSCALE_USER "$HEADSCALE_USER"
   ensure_headscale_user
   create_key
+  finish_run
 }
 
 main "$@"

@@ -12,14 +12,18 @@ readonly HEADER_FILE="${SCRIPT_DIR}/vps-menu-head.txt"
 
 MENU_LABELS=(
   "重装为 Debian 13"
+  "部署 Headscale 主节点全流程"
   "Debian 13 基础初始化 + 校验"
   "Debian 13 基础初始化结果校验"
   "配置 Cloudflare DNS"
-  "部署 Headscale 主节点"
+  "部署 Headscale 服务端"
+  "部署 k3s 主节点全流程"
+  "部署 k3s 子节点全流程"
+  "部署 Flux GitOps"
+  "查看 k3s 节点 token"
   "生成 Headscale 认证密钥"
   "接入 Headscale"
   "部署 k3s 主节点"
-  "查看 k3s 节点 token"
   "部署 k3s 子节点"
   "Headscale 主节点备份"
   "k3s 主节点备份"
@@ -31,6 +35,10 @@ MENU_GROUPS=(
   "初始化配置"
   "初始化配置"
   "初始化配置"
+  "初始化配置"
+  "并入集群配置"
+  "并入集群配置"
+  "并入集群配置"
   "并入集群配置"
   "并入集群配置"
   "并入集群配置"
@@ -42,21 +50,25 @@ MENU_GROUPS=(
 )
 MENU_HINTS=(
   "启动 Debian 13 重装"
+  "系统初始化、部署服务端、本机接入"
   "首次配置并立即校验"
   "只读检查当前状态"
   "写入 DNS 解析记录"
   "安装控制面服务"
+  "接入 Headscale、部署 server、部署 GitOps"
+  "接入 Headscale、部署 agent"
+  "安装 GitOps 控制面"
+  "输出 worker 接入 token"
   "生成一次性接入 key"
   "当前节点加入 hollow-net"
   "部署 Kubernetes server"
-  "输出 worker 接入 token"
   "部署 Kubernetes agent"
   "加密并上传配置状态"
   "加密并上传集群状态"
   "返回 shell"
 )
-MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "0")
-MENU_ACTIONS=("reinstall" "bootstrap" "check" "cloudflare-dns" "headscale-server" "headscale-authkey" "headscale-client" "k3s-server" "k3s-token" "k3s-agent" "backup-headscale" "backup-k3s" "exit")
+MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "f" "g" "0")
+MENU_ACTIONS=("reinstall" "headscale-main-node" "bootstrap" "check" "cloudflare-dns" "headscale-server" "k3s-main-node" "k3s-worker-node" "flux-gitops" "k3s-token" "headscale-authkey" "headscale-client" "k3s-server" "k3s-agent" "backup-headscale" "backup-k3s" "exit")
 
 ITEM_LINES=()
 MENU_END_LINE=1
@@ -294,6 +306,15 @@ run_selected_action() {
       run_bootstrap_with_check || true
       pause_return
       ;;
+    headscale-main-node)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path headscale-main-node.sh)" || true
+      pause_return
+      ;;
     check)
       confirm_action "$label" || {
         printf '\n已取消。\n'
@@ -346,6 +367,33 @@ run_selected_action() {
         return 0
       }
       run_script "$(script_path k3s-server.sh)" || true
+      pause_return
+      ;;
+    k3s-main-node)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path k3s-main-node.sh)" || true
+      pause_return
+      ;;
+    k3s-worker-node)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path k3s-worker-node.sh)" || true
+      pause_return
+      ;;
+    flux-gitops)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_script "$(script_path flux-gitops.sh)" || true
       pause_return
       ;;
     k3s-token)

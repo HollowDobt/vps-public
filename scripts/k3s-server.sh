@@ -21,6 +21,7 @@ readonly K3S_CONFIG="/etc/rancher/k3s/config.yaml"
 
 K3S_VERSION="${K3S_VERSION:-}"
 K3S_TOKEN="${K3S_TOKEN:-}"
+K3S_AGENT_TOKEN="${K3S_AGENT_TOKEN:-}"
 K3S_CLUSTER_INIT="${K3S_CLUSTER_INIT:-1}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
 K3S_NODE_IP="${K3S_NODE_IP:-}"
@@ -38,6 +39,7 @@ K3S_UFW_ALLOW="${K3S_UFW_ALLOW:-1}"
 K3S_UFW_INTERFACE="${K3S_UFW_INTERFACE:-}"
 K3S_API_PORT="${K3S_API_PORT:-6443}"
 K3S_SERVER_HOSTNAME="${K3S_SERVER_HOSTNAME:-}"
+K3S_SERVER_URL="${K3S_SERVER_URL:-}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
 HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
 CLOUDFLARE_K3S_DNS_NAMES="${CLOUDFLARE_K3S_DNS_NAMES:-}"
@@ -111,6 +113,17 @@ apply_tailnet_defaults() {
   append_tls_san "$public_ip"
 }
 
+resolve_server_url() {
+  if [[ -n "$K3S_SERVER_URL" ]]; then
+    return 0
+  fi
+  if [[ -n "$K3S_SERVER_HOSTNAME" ]]; then
+    K3S_SERVER_URL="https://${K3S_SERVER_HOSTNAME}:${K3S_API_PORT}"
+  else
+    K3S_SERVER_URL="https://${K3S_ADVERTISE_ADDRESS}:${K3S_API_PORT}"
+  fi
+}
+
 existing_config_token() {
   [[ -r "$K3S_CONFIG" ]] || return 1
   awk -F: '$1 == "token" { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); gsub(/^"|"$/, "", $2); print $2; exit }' "$K3S_CONFIG"
@@ -119,15 +132,31 @@ existing_config_token() {
 ensure_token() {
   local existing
 
-  [[ -n "$K3S_TOKEN" ]] && return 0
+  [[ -n "$K3S_TOKEN" ]] && {
+    persist_env_value K3S_TOKEN "$K3S_TOKEN"
+    return 0
+  }
   existing="$(existing_config_token || true)"
   if [[ -n "$existing" ]]; then
     K3S_TOKEN="$existing"
+    persist_env_value K3S_TOKEN "$K3S_TOKEN"
     return 0
   fi
 
   K3S_TOKEN="$(openssl rand -hex 32)"
+  persist_env_value K3S_TOKEN "$K3S_TOKEN"
   log "已生成 k3s token。"
+}
+
+persist_k3s_server_config() {
+  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
+  persist_env_value K3S_NODE_IP "$K3S_NODE_IP"
+  persist_env_value K3S_ADVERTISE_ADDRESS "$K3S_ADVERTISE_ADDRESS"
+  persist_env_value K3S_FLANNEL_IFACE "$K3S_FLANNEL_IFACE"
+  persist_env_value K3S_UFW_INTERFACE "$K3S_UFW_INTERFACE"
+  persist_env_value K3S_API_PORT "$K3S_API_PORT"
+  persist_env_value K3S_SERVER_URL "$K3S_SERVER_URL"
+  [[ -n "$K3S_SERVER_HOSTNAME" ]] && persist_env_value K3S_SERVER_HOSTNAME "$K3S_SERVER_HOSTNAME"
 }
 
 write_k3s_config() {
@@ -208,6 +237,17 @@ install_k3s() {
   systemctl enable --now k3s
 }
 
+persist_agent_token_if_available() {
+  local token_file="/var/lib/rancher/k3s/server/node-token"
+  local token
+
+  [[ -r "$token_file" ]] || return 0
+  token="$(awk 'NF { print; exit }' "$token_file")"
+  [[ -n "$token" ]] || return 0
+  K3S_AGENT_TOKEN="$token"
+  persist_env_value K3S_AGENT_TOKEN "$K3S_AGENT_TOKEN"
+}
+
 configure_ufw() {
   [[ "$K3S_UFW_ALLOW" == "1" ]] || return 0
   command_exists ufw || return 0
@@ -261,16 +301,22 @@ main() {
   setup_state_dir
   install_traps
   load_env
+  recover_previous_run
   validate_input
-  persist_env_file
   apply_tailnet_defaults
+  resolve_server_url
+  begin_run
+  persist_env_file
   ensure_token
+  persist_k3s_server_config
   write_k3s_config
   configure_ufw
   configure_cloudflare_dns_if_needed
   install_k3s
+  persist_agent_token_if_available
   install_backup_timer k3s
   print_summary
+  finish_run
 }
 
 main "$@"
