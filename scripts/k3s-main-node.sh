@@ -34,7 +34,7 @@ usage() {
   - 用于 k3s 主节点。
   - 默认不会执行 Debian 13 基础初始化；需要时先从菜单单独执行。
   - 必须已经准备好 HEADSCALE_SERVER_URL 和 HEADSCALE_AUTHKEY。
-  - K3S_MAIN_ENABLE_FLUX=1 时还需要 GITHUB_TOKEN 与 FLUX_GITHUB_OWNER。
+  - K3S_MAIN_ENABLE_FLUX=1 时会自动部署 Flux GitOps。
 EOF
 }
 

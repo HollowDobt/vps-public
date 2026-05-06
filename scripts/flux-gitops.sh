@@ -36,6 +36,7 @@ FLUX_AGE_PUBLIC_KEY="${FLUX_AGE_PUBLIC_KEY:-}"
 FLUX_INTERVAL="${FLUX_INTERVAL:-10m0s}"
 FLUX_RETRY_INTERVAL="${FLUX_RETRY_INTERVAL:-1m0s}"
 FLUX_TIMEOUT="${FLUX_TIMEOUT:-5m0s}"
+FLUX_FORGET_GITHUB_TOKEN="${FLUX_FORGET_GITHUB_TOKEN:-1}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
@@ -78,6 +79,7 @@ validate_input() {
   validate_bool FLUX_GITHUB_PRIVATE "$FLUX_GITHUB_PRIVATE"
   validate_bool FLUX_GITHUB_PERSONAL "$FLUX_GITHUB_PERSONAL"
   validate_bool FLUX_REPO_SCAFFOLD "$FLUX_REPO_SCAFFOLD"
+  validate_bool FLUX_FORGET_GITHUB_TOKEN "$FLUX_FORGET_GITHUB_TOKEN"
 }
 
 resolve_defaults() {
@@ -176,7 +178,7 @@ ensure_git_ssh_key() {
 
   install -d -o root -g root -m 0700 "$(dirname "$FLUX_GIT_SSH_KEY_FILE")"
   if [[ ! -s "$FLUX_GIT_SSH_KEY_FILE" ]]; then
-    [[ -n "$GITHUB_TOKEN" ]] || die "缺少 GitHub deploy key：$FLUX_GIT_SSH_KEY_FILE"
+    [[ -n "$GITHUB_TOKEN" ]] || die "首次 SSH bootstrap 需要 GITHUB_TOKEN 用于创建仓库和注册 deploy key。"
     log "生成 Flux GitHub deploy key。"
     ssh-keygen -t ed25519 -N '' -C "flux-${FLUX_CLUSTER_NAME}" -f "$FLUX_GIT_SSH_KEY_FILE" >/dev/null
   fi
@@ -230,6 +232,8 @@ ensure_github_deploy_key_if_token_available() {
   local public_key_file="${FLUX_GIT_SSH_KEY_FILE}.pub"
   local public_key
   local keys
+  local key_id
+  local key_read_only
   local body
 
   [[ "$FLUX_GIT_AUTH" == "ssh" ]] || return 0
@@ -239,8 +243,14 @@ ensure_github_deploy_key_if_token_available() {
 
   public_key="$(awk 'NF { print; exit }' "$public_key_file")"
   keys="$(github_api GET "/repos/${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}/keys")"
-  if jq -e --arg key "$public_key" '.[] | select(.key == $key)' <<<"$keys" >/dev/null; then
-    return 0
+  key_id="$(jq -r --arg key "$public_key" '.[] | select(.key == $key) | .id' <<<"$keys" | awk 'NF { print; exit }')"
+  if [[ -n "$key_id" ]]; then
+    key_read_only="$(jq -r --arg key "$public_key" '.[] | select(.key == $key) | .read_only' <<<"$keys" | awk 'NF { print; exit }')"
+    if [[ "$key_read_only" == "false" ]]; then
+      return 0
+    fi
+    log "删除只读 GitHub deploy key：${key_id}"
+    github_api DELETE "/repos/${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}/keys/${key_id}" >/dev/null
   fi
 
   body="$(jq -nc \
@@ -250,6 +260,13 @@ ensure_github_deploy_key_if_token_available() {
 
   log "写入 GitHub deploy key：${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}"
   github_api POST "/repos/${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}/keys" "$body" >/dev/null
+}
+
+ensure_git_repository_access() {
+  [[ "$FLUX_GIT_AUTH" == "ssh" ]] || return 0
+
+  log "校验 GitOps 仓库 SSH 访问。"
+  GIT_SSH_COMMAND="$(git_ssh_command)" git ls-remote "$(git_clone_url)" HEAD >/dev/null
 }
 
 ensure_age_key() {
@@ -271,10 +288,29 @@ persist_flux_config() {
   persist_env_value FLUX_GIT_AUTH "$FLUX_GIT_AUTH"
   persist_env_value FLUX_GIT_SSH_KEY_FILE "$FLUX_GIT_SSH_KEY_FILE"
   persist_env_value FLUX_AGE_KEY_FILE "$FLUX_AGE_KEY_FILE"
+  persist_env_value FLUX_FORGET_GITHUB_TOKEN "$FLUX_FORGET_GITHUB_TOKEN"
   if [[ -n "$FLUX_AGE_PUBLIC_KEY" ]]; then
     persist_env_value FLUX_AGE_PUBLIC_KEY "$FLUX_AGE_PUBLIC_KEY"
   fi
   return 0
+}
+
+remove_env_key_from_file() {
+  local target="$1"
+  local key="$2"
+  local temp_file
+
+  [[ -e "$target" ]] || return 0
+  temp_file="$(mktemp_managed)"
+  awk -v key="$key" '$0 !~ "^[[:space:]]*" key "=" { print }' "$target" >"$temp_file"
+  atomic_install_file "$temp_file" "$target" 0600 root root
+}
+
+forget_github_token_if_needed() {
+  [[ "$FLUX_FORGET_GITHUB_TOKEN" == "1" ]] || return 0
+
+  remove_env_key_from_file /etc/hlwdot/vps.env GITHUB_TOKEN
+  remove_env_key_from_file /etc/hlwdot/vps.env GH_TOKEN
 }
 
 ensure_sops_secret() {
@@ -620,12 +656,14 @@ main() {
   ensure_git_ssh_key
   ensure_github_repo_if_token_available
   ensure_github_deploy_key_if_token_available
+  ensure_git_repository_access
   ensure_age_key
   persist_flux_config
   flux_bootstrap
   ensure_sops_secret
   scaffold_repo
   reconcile_flux
+  forget_github_token_if_needed
   print_summary
   finish_run
 }
