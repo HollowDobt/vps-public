@@ -295,7 +295,8 @@ flux_bootstrap() {
       --url "$(git_clone_url)"
       --branch "$FLUX_GITHUB_BRANCH"
       --path "$FLUX_GITHUB_PATH"
-      --private-key-file "$FLUX_GIT_SSH_KEY_FILE")
+      --private-key-file "$FLUX_GIT_SSH_KEY_FILE"
+      --silent)
   else
     args=(bootstrap github
       --token-auth
