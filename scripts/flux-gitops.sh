@@ -561,10 +561,24 @@ EOF
 }
 
 reconcile_flux() {
+  local name
+  local attempt
+
   flux check
-  flux reconcile source git flux-system -n flux-system || true
-  flux reconcile kustomization infrastructure -n flux-system --with-source || true
-  flux reconcile kustomization apps -n flux-system --with-source || true
+  flux reconcile source git flux-system -n flux-system
+  flux reconcile kustomization flux-system -n flux-system --with-source
+
+  for name in infrastructure apps; do
+    for attempt in $(seq 1 90); do
+      if "${KUBECTL[@]}" -n flux-system get kustomization "$name" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 2
+    done
+    "${KUBECTL[@]}" -n flux-system get kustomization "$name" >/dev/null 2>&1 || die "Flux Kustomization 未创建：$name"
+    flux reconcile kustomization "$name" -n flux-system --with-source
+    "${KUBECTL[@]}" -n flux-system wait "kustomization/${name}" --for=condition=Ready --timeout=180s
+  done
 }
 
 print_summary() {
