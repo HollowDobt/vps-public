@@ -34,6 +34,9 @@ FLUX_INTERVAL="${FLUX_INTERVAL:-10m0s}"
 FLUX_RETRY_INTERVAL="${FLUX_RETRY_INTERVAL:-1m0s}"
 FLUX_TIMEOUT="${FLUX_TIMEOUT:-5m0s}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+K3S_NODE_NAME="${K3S_NODE_NAME:-}"
+HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
+BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-}"
 
 KUBECTL=()
 AGE_PUBLIC_KEY=''
@@ -69,7 +72,15 @@ validate_input() {
 
 resolve_defaults() {
   if [[ -z "$FLUX_CLUSTER_NAME" ]]; then
-    FLUX_CLUSTER_NAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'k3s')"
+    if [[ -n "$K3S_NODE_NAME" ]]; then
+      FLUX_CLUSTER_NAME="$K3S_NODE_NAME"
+    elif [[ -n "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
+      FLUX_CLUSTER_NAME="$HEADSCALE_CLIENT_HOSTNAME"
+    elif [[ -n "$BOOTSTRAP_HOSTNAME" ]]; then
+      FLUX_CLUSTER_NAME="$BOOTSTRAP_HOSTNAME"
+    else
+      FLUX_CLUSTER_NAME="$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf 'k3s')"
+    fi
   fi
   if [[ -z "$FLUX_GITHUB_PATH" ]]; then
     FLUX_GITHUB_PATH="clusters/${FLUX_CLUSTER_NAME}"
