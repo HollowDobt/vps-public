@@ -32,6 +32,7 @@ HEADSCALE_ENABLE_TS_SSH="${HEADSCALE_ENABLE_TS_SSH:-0}"
 HEADSCALE_RESET="${HEADSCALE_RESET:-0}"
 HEADSCALE_EXTRA_UP_ARGS="${HEADSCALE_EXTRA_UP_ARGS:-}"
 HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
+HOLLOW_NET_UFW_ALLOW="${HOLLOW_NET_UFW_ALLOW:-1}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
 
 usage() {
@@ -61,6 +62,7 @@ validate_input() {
   validate_bool HEADSCALE_ADVERTISE_EXIT_NODE "$HEADSCALE_ADVERTISE_EXIT_NODE"
   validate_bool HEADSCALE_ENABLE_TS_SSH "$HEADSCALE_ENABLE_TS_SSH"
   validate_bool HEADSCALE_RESET "$HEADSCALE_RESET"
+  validate_bool HOLLOW_NET_UFW_ALLOW "$HOLLOW_NET_UFW_ALLOW"
 }
 
 resolve_server_url() {
@@ -93,6 +95,7 @@ persist_client_config() {
   persist_env_value HEADSCALE_SERVER_URL "$HEADSCALE_SERVER_URL"
   persist_env_value HEADSCALE_CLIENT_HOSTNAME "$HEADSCALE_CLIENT_HOSTNAME"
   persist_env_value HOLLOW_NET_IFACE "$HOLLOW_NET_IFACE"
+  persist_env_value HOLLOW_NET_UFW_ALLOW "$HOLLOW_NET_UFW_ALLOW"
   persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
 }
 
@@ -239,6 +242,7 @@ main() {
   configure_tailscaled_interface
   start_tailscaled
   run_tailscale_up
+  configure_hollow_net_ufw
   persist_tailnet_state
   print_summary
   finish_run

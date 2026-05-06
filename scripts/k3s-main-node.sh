@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # k3s 主节点部署脚本。
 #
-# 适合 Kubernetes 控制节点使用。脚本先完成系统初始化和 Headscale 接入，
+# 适合 Kubernetes 控制节点使用。脚本先接入 Headscale，
 # 再部署 k3s server，最后按配置部署 Flux GitOps。
 
 set -Eeuo pipefail
@@ -18,8 +18,8 @@ readonly STATE_DIR="/var/lib/hlwdot/k3s-main-node"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-K3S_MAIN_RUN_BOOTSTRAP="${K3S_MAIN_RUN_BOOTSTRAP:-1}"
-K3S_MAIN_RUN_CHECK="${K3S_MAIN_RUN_CHECK:-1}"
+K3S_MAIN_RUN_BOOTSTRAP="${K3S_MAIN_RUN_BOOTSTRAP:-0}"
+K3S_MAIN_RUN_CHECK="${K3S_MAIN_RUN_CHECK:-0}"
 K3S_MAIN_ENABLE_FLUX="${K3S_MAIN_ENABLE_FLUX:-1}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
@@ -32,6 +32,7 @@ usage() {
 
 说明：
   - 用于 k3s 主节点。
+  - 默认不会执行 Debian 13 基础初始化；需要时先从菜单单独执行。
   - 必须已经准备好 HEADSCALE_SERVER_URL 和 HEADSCALE_AUTHKEY。
   - K3S_MAIN_ENABLE_FLUX=1 时还需要 GITHUB_TOKEN 与 FLUX_GITHUB_OWNER。
 EOF

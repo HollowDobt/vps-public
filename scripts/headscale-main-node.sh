@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Headscale 主节点部署脚本。
 #
-# 适合第一台 VPN 控制节点使用。脚本按顺序执行 Debian 基础初始化、
-# 初始化校验、Headscale 服务端部署、认证密钥生成和本机接入。
+# 适合第一台 VPN 控制节点使用。脚本部署 Headscale 服务端，
+# 按配置生成认证密钥，并可把本机接入 hollow-net。
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -18,8 +18,8 @@ readonly STATE_DIR="/var/lib/hlwdot/headscale-main-node"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-HEADSCALE_MAIN_RUN_BOOTSTRAP="${HEADSCALE_MAIN_RUN_BOOTSTRAP:-1}"
-HEADSCALE_MAIN_RUN_CHECK="${HEADSCALE_MAIN_RUN_CHECK:-1}"
+HEADSCALE_MAIN_RUN_BOOTSTRAP="${HEADSCALE_MAIN_RUN_BOOTSTRAP:-0}"
+HEADSCALE_MAIN_RUN_CHECK="${HEADSCALE_MAIN_RUN_CHECK:-0}"
 HEADSCALE_MAIN_JOIN_SELF="${HEADSCALE_MAIN_JOIN_SELF:-1}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
@@ -34,6 +34,7 @@ usage() {
 
 说明：
   - 用于 Headscale 主节点首次部署。
+  - 默认不会执行 Debian 13 基础初始化；需要时先从菜单单独执行。
   - HEADSCALE_SERVER_URL 可设置为 auto；如果设置了 CLOUDFLARE_ZONE，
     默认使用 https://headscale.\$CLOUDFLARE_ZONE。
   - 脚本会把生成的 hostname、auth key、Headscale IP 写入 /etc/hlwdot/vps.env。

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # k3s 子节点部署脚本。
 #
-# 适合普通工作节点使用。脚本先完成系统初始化和 Headscale 接入，
+# 适合普通工作节点使用。脚本先接入 Headscale，
 # 再用主节点提供的地址与 token 接入 k3s 集群。
 
 set -Eeuo pipefail
@@ -18,8 +18,8 @@ readonly STATE_DIR="/var/lib/hlwdot/k3s-worker-node"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-K3S_WORKER_RUN_BOOTSTRAP="${K3S_WORKER_RUN_BOOTSTRAP:-1}"
-K3S_WORKER_RUN_CHECK="${K3S_WORKER_RUN_CHECK:-1}"
+K3S_WORKER_RUN_BOOTSTRAP="${K3S_WORKER_RUN_BOOTSTRAP:-0}"
+K3S_WORKER_RUN_CHECK="${K3S_WORKER_RUN_CHECK:-0}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
 BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-}"
@@ -31,6 +31,7 @@ usage() {
 
 说明：
   - 用于 k3s 子节点。
+  - 默认不会执行 Debian 13 基础初始化；需要时先从菜单单独执行。
   - 必须已经准备好 HEADSCALE_SERVER_URL、HEADSCALE_AUTHKEY、
     K3S_SERVER_URL，以及 K3S_AGENT_TOKEN 或 K3S_TOKEN。
 EOF

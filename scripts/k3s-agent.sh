@@ -28,6 +28,10 @@ K3S_FLANNEL_IFACE="${K3S_FLANNEL_IFACE:-}"
 K3S_AGENT_EXTRA_ARGS="${K3S_AGENT_EXTRA_ARGS:-}"
 K3S_SERVER_HOSTNAME="${K3S_SERVER_HOSTNAME:-}"
 K3S_API_PORT="${K3S_API_PORT:-6443}"
+K3S_CLUSTER_CIDR="${K3S_CLUSTER_CIDR:-10.42.0.0/16}"
+K3S_SERVICE_CIDR="${K3S_SERVICE_CIDR:-10.43.0.0/16}"
+K3S_UFW_ALLOW="${K3S_UFW_ALLOW:-1}"
+K3S_UFW_INTERFACE="${K3S_UFW_INTERFACE:-}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
 HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
 
@@ -54,6 +58,7 @@ EOF
 validate_input() {
   [[ "$HOLLOW_NET_IFACE" =~ ^[A-Za-z0-9_.-]+$ ]] || die "HOLLOW_NET_IFACE 包含非法字符。"
   [[ "$K3S_API_PORT" =~ ^[0-9]+$ ]] || die "K3S_API_PORT 必须是数字。"
+  validate_bool K3S_UFW_ALLOW "$K3S_UFW_ALLOW"
   if [[ -n "$HEADSCALE_CLIENT_HOSTNAME" && -n "$K3S_NODE_NAME" && "$HEADSCALE_CLIENT_HOSTNAME" != "$K3S_NODE_NAME" ]]; then
     die "K3S_NODE_NAME 必须与 HEADSCALE_CLIENT_HOSTNAME 一致。"
   fi
@@ -75,6 +80,7 @@ apply_tailnet_defaults() {
   [[ -n "$K3S_NODE_NAME" ]] || K3S_NODE_NAME="${HEADSCALE_CLIENT_HOSTNAME:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'k3s-agent')}"
   [[ -n "$K3S_NODE_IP" ]] || K3S_NODE_IP="$tailnet_ip"
   [[ -n "$K3S_FLANNEL_IFACE" ]] || K3S_FLANNEL_IFACE="$HOLLOW_NET_IFACE"
+  [[ -n "$K3S_UFW_INTERFACE" ]] || K3S_UFW_INTERFACE="$HOLLOW_NET_IFACE"
 }
 
 persist_k3s_agent_config() {
@@ -82,11 +88,16 @@ persist_k3s_agent_config() {
   persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
   persist_env_value K3S_NODE_IP "$K3S_NODE_IP"
   persist_env_value K3S_FLANNEL_IFACE "$K3S_FLANNEL_IFACE"
+  persist_env_value K3S_UFW_INTERFACE "$K3S_UFW_INTERFACE"
   persist_env_value HOLLOW_NET_IFACE "$HOLLOW_NET_IFACE"
   if [[ -n "$K3S_AGENT_TOKEN" ]]; then
     persist_env_value K3S_AGENT_TOKEN "$K3S_AGENT_TOKEN"
   fi
   return 0
+}
+
+configure_ufw() {
+  configure_k3s_ufw_rules agent
 }
 
 write_k3s_config() {
@@ -174,6 +185,7 @@ main() {
   persist_env_file
   persist_k3s_agent_config
   write_k3s_config
+  configure_ufw
   install_k3s_agent
   print_summary
   finish_run

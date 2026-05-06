@@ -408,6 +408,53 @@ cloudflare_configured() {
   [[ -n "${CLOUDFLARE_API_TOKEN:-}" || ( -n "${CLOUDFLARE_API_KEY:-}" && -n "${CLOUDFLARE_EMAIL:-}" ) ]]
 }
 
+configure_hollow_net_ufw() {
+  local iface="${HOLLOW_NET_IFACE:-hollow-net}"
+
+  [[ "${HOLLOW_NET_UFW_ALLOW:-1}" == "1" ]] || return 0
+  command_exists ufw || return 0
+
+  log "放行 ${iface} 网卡入站流量。"
+  ufw allow in on "$iface" to any comment 'hollow-net'
+}
+
+ufw_allow_in_on_iface() {
+  local iface="$1"
+  local port="$2"
+  local proto="$3"
+  local comment="$4"
+
+  if [[ -n "$iface" ]]; then
+    ufw allow in on "$iface" to any port "$port" proto "$proto" comment "$comment"
+  else
+    ufw allow "${port}/${proto}" comment "$comment"
+  fi
+}
+
+configure_k3s_ufw_rules() {
+  local role="$1"
+  local iface="${K3S_UFW_INTERFACE:-${HOLLOW_NET_IFACE:-hollow-net}}"
+  local api_port="${K3S_API_PORT:-6443}"
+  local cluster_cidr="${K3S_CLUSTER_CIDR:-10.42.0.0/16}"
+  local service_cidr="${K3S_SERVICE_CIDR:-10.43.0.0/16}"
+
+  [[ "${K3S_UFW_ALLOW:-1}" == "1" ]] || return 0
+  command_exists ufw || return 0
+
+  log "配置 k3s 防火墙规则：${iface}"
+  if [[ "$role" == "server" ]]; then
+    ufw_allow_in_on_iface "$iface" "$api_port" tcp 'k3s api'
+    if [[ "${K3S_UFW_ALLOW_ETCD:-0}" == "1" ]]; then
+      ufw_allow_in_on_iface "$iface" '2379:2380' tcp 'k3s etcd'
+    fi
+  fi
+
+  ufw_allow_in_on_iface "$iface" 8472 udp 'k3s flannel vxlan'
+  ufw_allow_in_on_iface "$iface" 10250 tcp 'k3s kubelet'
+  ufw allow from "$cluster_cidr" to any comment 'k3s pods'
+  ufw allow from "$service_cidr" to any comment 'k3s services'
+}
+
 systemd_reload() {
   systemctl daemon-reload
 }

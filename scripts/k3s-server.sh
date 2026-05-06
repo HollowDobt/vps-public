@@ -37,6 +37,7 @@ K3S_ETCD_SNAPSHOT_COMPRESS="${K3S_ETCD_SNAPSHOT_COMPRESS:-1}"
 K3S_SERVER_EXTRA_ARGS="${K3S_SERVER_EXTRA_ARGS:-}"
 K3S_UFW_ALLOW="${K3S_UFW_ALLOW:-1}"
 K3S_UFW_INTERFACE="${K3S_UFW_INTERFACE:-}"
+K3S_UFW_ALLOW_ETCD="${K3S_UFW_ALLOW_ETCD:-0}"
 K3S_API_PORT="${K3S_API_PORT:-6443}"
 K3S_SERVER_HOSTNAME="${K3S_SERVER_HOSTNAME:-}"
 K3S_SERVER_URL="${K3S_SERVER_URL:-}"
@@ -70,6 +71,7 @@ validate_input() {
   validate_bool K3S_CLUSTER_INIT "$K3S_CLUSTER_INIT"
   validate_bool K3S_ETCD_SNAPSHOT_COMPRESS "$K3S_ETCD_SNAPSHOT_COMPRESS"
   validate_bool K3S_UFW_ALLOW "$K3S_UFW_ALLOW"
+  validate_bool K3S_UFW_ALLOW_ETCD "$K3S_UFW_ALLOW_ETCD"
   validate_bool CLOUDFLARE_DNS_PROXIED "$CLOUDFLARE_DNS_PROXIED"
   [[ "$HOLLOW_NET_IFACE" =~ ^[A-Za-z0-9_.-]+$ ]] || die "HOLLOW_NET_IFACE 包含非法字符。"
   if [[ -n "$HEADSCALE_CLIENT_HOSTNAME" && -n "$K3S_NODE_NAME" && "$HEADSCALE_CLIENT_HOSTNAME" != "$K3S_NODE_NAME" ]]; then
@@ -260,14 +262,7 @@ persist_agent_token_if_available() {
 }
 
 configure_ufw() {
-  [[ "$K3S_UFW_ALLOW" == "1" ]] || return 0
-  command_exists ufw || return 0
-
-  if [[ -n "$K3S_UFW_INTERFACE" ]]; then
-    ufw allow in on "$K3S_UFW_INTERFACE" to any port "$K3S_API_PORT" proto tcp comment 'k3s api'
-  else
-    ufw allow "${K3S_API_PORT}/tcp" comment 'k3s api'
-  fi
+  configure_k3s_ufw_rules server
 }
 
 configure_cloudflare_dns_if_needed() {
