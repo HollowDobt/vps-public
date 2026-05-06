@@ -318,6 +318,7 @@ main() {
   write_k3s_config
   configure_ufw
   configure_cloudflare_dns_if_needed
+  configure_k3s_tailnet_boot_guard k3s
   install_k3s
   persist_agent_token_if_available
   install_backup_timer k3s

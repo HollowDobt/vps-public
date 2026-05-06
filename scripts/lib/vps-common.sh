@@ -457,6 +457,44 @@ configure_k3s_ufw_rules() {
   ufw route allow from "$service_cidr" to any comment 'k3s service routes'
 }
 
+configure_k3s_tailnet_boot_guard() {
+  local service_name="$1"
+  local iface="${K3S_FLANNEL_IFACE:-${HOLLOW_NET_IFACE:-hollow-net}}"
+  local wait_seconds="${K3S_TAILNET_BOOT_WAIT_SEC:-120}"
+  local dropin_dir="/etc/systemd/system/${service_name}.service.d"
+  local dropin_file="${dropin_dir}/10-hlwdot-tailnet.conf"
+  local temp_file
+  local wait_script
+
+  case "$service_name" in
+    k3s | k3s-agent) ;;
+    *) die "不支持的 k3s systemd 服务：$service_name" ;;
+  esac
+  [[ "$iface" =~ ^[A-Za-z0-9_.-]+$ ]] || die "k3s 网卡名称包含非法字符：$iface"
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] || die "K3S_TAILNET_BOOT_WAIT_SEC 必须是数字。"
+
+  printf -v wait_script \
+    'elapsed=0; while [ "$elapsed" -lt %s ]; do /usr/sbin/ip link show %s >/dev/null 2>&1 && /usr/sbin/ip -4 addr show dev %s | /usr/bin/grep -q "inet " && exit 0; elapsed=$((elapsed + 2)); /bin/sleep 2; done; echo "等待 %s 网卡 IPv4 超时" >&2; exit 1' \
+    "$wait_seconds" "$(shell_quote "$iface")" "$(shell_quote "$iface")" "$iface"
+
+  temp_file="$(mktemp_managed)"
+  {
+    printf '[Unit]\n'
+    printf '# k3s 使用 hollow-net 承载集群流量，开机时先等 tailscaled 建好网卡。\n'
+    printf 'Wants=network-online.target tailscaled.service\n'
+    printf 'After=network-online.target tailscaled.service\n'
+    printf 'StartLimitIntervalSec=0\n\n'
+    printf '[Service]\n'
+    printf 'ExecStartPre=/bin/sh -c %s\n' "$(shell_quote "$wait_script")"
+    printf 'Restart=always\n'
+    printf 'RestartSec=5s\n'
+  } >"$temp_file"
+
+  atomic_install_file "$temp_file" "$dropin_file" 0644 root root
+  systemd_reload
+  log "配置 k3s 开机等待网卡：${service_name}.service -> ${iface}"
+}
+
 systemd_reload() {
   systemctl daemon-reload
 }

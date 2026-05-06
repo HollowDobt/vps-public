@@ -186,6 +186,7 @@ main() {
   persist_k3s_agent_config
   write_k3s_config
   configure_ufw
+  configure_k3s_tailnet_boot_guard k3s-agent
   install_k3s_agent
   print_summary
   finish_run
