@@ -1,8 +1,8 @@
 #!/bin/sh
-# Alpine hollow-net 接入脚本。
+# Alpine Headscale 网络接入脚本。
 #
 # 用于低配 Alpine VPS。脚本只安装并配置 Tailscale/OpenRC，
-# 然后把当前节点接入 Headscale 管理的 hollow-net，不处理 Debian 初始化，
+# 然后把当前节点接入 Headscale 管理的内网，不处理 Debian 初始化，
 # 也不部署 k3s。
 
 set -eu
@@ -85,9 +85,9 @@ usage() {
 
 说明：
   - 仅支持 Alpine Linux + OpenRC。
-  - 默认只接入 hollow-net，不部署 k3s。
-  - 出站分流指 hollow-net 内的机器访问本机代理端口。
-  - 入站分流指公网端口转发到 hollow-net 内部目标。
+  - 默认只接入 Headscale 网络，不部署 k3s。
+  - 出站分流指 Headscale 网络内的机器访问本机代理端口。
+  - 入站分流指公网端口转发到 Headscale 网络内部目标。
 EOF
 }
 
@@ -263,11 +263,33 @@ install_packages() {
 }
 
 configure_tun_module() {
-  modprobe tun 2>/dev/null || warn "tun 模块加载失败，稍后请检查 VPS 内核。"
   mkdir -p /etc/modules-load.d
   printf 'tun\n' >/etc/modules-load.d/90-hlwdot-tailscale.conf
   touch /etc/modules
   grep -qxF tun /etc/modules || printf 'tun\n' >>/etc/modules
+
+  if [ -c /dev/net/tun ]; then
+    log "tun 设备已就绪。"
+    return 0
+  fi
+
+  modprobe tun 2>/dev/null || true
+  if [ -c /dev/net/tun ]; then
+    log "tun 设备已就绪。"
+    return 0
+  fi
+
+  mkdir -p /dev/net
+  if command_exists mknod; then
+    mknod /dev/net/tun c 10 200 2>/dev/null || true
+    chmod 0666 /dev/net/tun 2>/dev/null || true
+  fi
+
+  if [ -c /dev/net/tun ]; then
+    log "tun 设备已就绪。"
+  else
+    warn "未检测到 /dev/net/tun；如果 tailscaled 启动失败，请检查 VPS 是否允许 TUN。"
+  fi
 }
 
 tailscaled_bin() {
@@ -291,7 +313,7 @@ EOF
 #!/sbin/openrc-run
 
 name="hollow-tailscaled"
-description="HlwDot tailscaled for hollow-net"
+description="HlwDot tailscaled for Headscale network"
 supervisor="${HOLLOW_TAILSCALED_SUPERVISOR:-supervise-daemon}"
 command="${HOLLOW_TAILSCALED_BIN:-/usr/sbin/tailscaled}"
 command_args="--state=${HOLLOW_TAILSCALED_STATE:-/var/lib/tailscale/tailscaled.state} --socket=${HOLLOW_TAILSCALED_SOCKET:-/run/tailscale/tailscaled.sock} --port=${HOLLOW_TAILSCALE_PORT:-41641} --tun=${HOLLOW_NET_IFACE:-hollow-net} ${HOLLOW_TAILSCALED_EXTRA_ARGS:-}"
@@ -307,7 +329,12 @@ depend() {
 start_pre() {
   checkpath -d -m 0755 /run/tailscale
   checkpath -d -m 0700 /var/lib/tailscale
+  checkpath -d -m 0755 /dev/net
   modprobe tun 2>/dev/null || true
+  if [ ! -c /dev/net/tun ]; then
+    mknod /dev/net/tun c 10 200 2>/dev/null || true
+    chmod 0666 /dev/net/tun 2>/dev/null || true
+  fi
 }
 EOF
   chmod 0755 "$HOLLOW_OPENRC_INIT"
@@ -406,7 +433,7 @@ write_split_rules_script() {
   mkdir -p /etc/local.d
   {
     printf '#!/bin/sh\n'
-    printf '# hollow-net 分流规则。由 alpine-hollow-client.sh 生成。\n\n'
+    printf '# Headscale 网络分流规则。由 alpine-hollow-client.sh 生成。\n\n'
     printf 'set -eu\n\n'
     printf 'HOLLOW_NET_IFACE=%s\n' "$(shell_quote "$HOLLOW_NET_IFACE")"
     printf 'PUBLIC_IFACE=%s\n\n' "$(shell_quote "$public_iface")"
@@ -460,7 +487,7 @@ write_split_rules_script() {
 
   rc-update add local default >/dev/null 2>&1 || true
   sh "$SPLIT_LOCAL_SCRIPT"
-  log "已配置 hollow-net 分流规则：${ALPINE_SPLIT_DIRECTION}"
+  log "已配置 Headscale 网络分流规则：${ALPINE_SPLIT_DIRECTION}"
 }
 
 tailnet_already_up() {
@@ -502,7 +529,7 @@ persist_tailnet_state() {
 }
 
 print_summary() {
-  printf '\nAlpine hollow-net 接入完成。\n'
+  printf '\nAlpine Headscale 网络接入完成。\n'
   printf '  login-server：%s\n' "$HEADSCALE_SERVER_URL"
   printf '  hostname：%s\n' "$HEADSCALE_CLIENT_HOSTNAME"
   printf '  网卡：%s\n' "$HOLLOW_NET_IFACE"
