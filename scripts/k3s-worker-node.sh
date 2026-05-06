@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # k3s 子节点部署脚本。
 #
-# 适合普通工作节点使用。脚本先接入 Headscale，
-# 再用主节点提供的地址与 token 接入 k3s 集群。
+# 适合普通工作节点使用。脚本只检查本机已经接入 Headscale，
+# 然后用主节点提供的地址与 token 接入 k3s 集群。
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -18,8 +18,6 @@ readonly STATE_DIR="/var/lib/hlwdot/k3s-worker-node"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-K3S_WORKER_RUN_BOOTSTRAP="${K3S_WORKER_RUN_BOOTSTRAP:-0}"
-K3S_WORKER_RUN_CHECK="${K3S_WORKER_RUN_CHECK:-0}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
 BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-}"
@@ -31,9 +29,9 @@ usage() {
 
 说明：
   - 用于 k3s 子节点。
-  - 默认不会执行 Debian 13 基础初始化；需要时先从菜单单独执行。
-  - 必须已经准备好 HEADSCALE_SERVER_URL、HEADSCALE_AUTHKEY、
-    K3S_SERVER_URL，以及 K3S_AGENT_TOKEN 或 K3S_TOKEN。
+  - 只检查 Headscale 接入状态，不会执行基础初始化或 Headscale 接入。
+  - 必须已经能通过 ${HOLLOW_NET_IFACE:-hollow-net} 访问 Headscale 网络。
+  - 必须已经准备好 K3S_SERVER_URL，以及 K3S_AGENT_TOKEN 或 K3S_TOKEN。
 EOF
 }
 
@@ -73,9 +71,12 @@ persist_defaults() {
   persist_env_value BOOTSTRAP_HOSTNAME "$BOOTSTRAP_HOSTNAME"
 }
 
-validate_input() {
-  validate_bool K3S_WORKER_RUN_BOOTSTRAP "$K3S_WORKER_RUN_BOOTSTRAP"
-  validate_bool K3S_WORKER_RUN_CHECK "$K3S_WORKER_RUN_CHECK"
+check_headscale_dependency() {
+  local tailnet_ip
+  local iface="${HOLLOW_NET_IFACE:-hollow-net}"
+
+  tailnet_ip="$(require_tailnet_ready)"
+  log "Headscale 网络已就绪：${iface} ${tailnet_ip}"
 }
 
 main() {
@@ -98,19 +99,11 @@ main() {
   load_env
   recover_previous_run
   derive_defaults
-  validate_input
   begin_run
   persist_env_file
   persist_defaults
 
-  if [[ "$K3S_WORKER_RUN_BOOTSTRAP" == "1" ]]; then
-    run_child "Debian 13 基础初始化" "$(script_path debian13-bootstrap.sh)"
-  fi
-  if [[ "$K3S_WORKER_RUN_CHECK" == "1" ]]; then
-    run_child "Debian 13 初始化校验" "$(script_path debian13-bootstrap-check.sh)"
-  fi
-
-  run_child "接入 Headscale" "$(script_path headscale-client.sh)"
+  check_headscale_dependency
   run_child "部署 k3s 子节点" "$(script_path k3s-agent.sh)"
 
   finish_run

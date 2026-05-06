@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # k3s 主节点部署脚本。
 #
-# 适合 Kubernetes 控制节点使用。脚本先接入 Headscale，
-# 再部署 k3s server，最后按配置部署 Flux GitOps。
+# 适合 Kubernetes 控制节点使用。脚本只检查本机已经接入 Headscale，
+# 然后部署 k3s server，最后按配置部署 Flux GitOps。
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -18,8 +18,6 @@ readonly STATE_DIR="/var/lib/hlwdot/k3s-main-node"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-K3S_MAIN_RUN_BOOTSTRAP="${K3S_MAIN_RUN_BOOTSTRAP:-0}"
-K3S_MAIN_RUN_CHECK="${K3S_MAIN_RUN_CHECK:-0}"
 K3S_MAIN_ENABLE_FLUX="${K3S_MAIN_ENABLE_FLUX:-1}"
 HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
@@ -32,8 +30,8 @@ usage() {
 
 说明：
   - 用于 k3s 主节点。
-  - 默认不会执行 Debian 13 基础初始化；需要时先从菜单单独执行。
-  - 必须已经准备好 HEADSCALE_SERVER_URL 和 HEADSCALE_AUTHKEY。
+  - 只检查 Headscale 接入状态，不会执行基础初始化或 Headscale 接入。
+  - 必须已经能通过 ${HOLLOW_NET_IFACE:-hollow-net} 访问 Headscale 网络。
   - K3S_MAIN_ENABLE_FLUX=1 时会自动部署 Flux GitOps。
 EOF
 }
@@ -75,9 +73,15 @@ persist_defaults() {
 }
 
 validate_input() {
-  validate_bool K3S_MAIN_RUN_BOOTSTRAP "$K3S_MAIN_RUN_BOOTSTRAP"
-  validate_bool K3S_MAIN_RUN_CHECK "$K3S_MAIN_RUN_CHECK"
   validate_bool K3S_MAIN_ENABLE_FLUX "$K3S_MAIN_ENABLE_FLUX"
+}
+
+check_headscale_dependency() {
+  local tailnet_ip
+  local iface="${HOLLOW_NET_IFACE:-hollow-net}"
+
+  tailnet_ip="$(require_tailnet_ready)"
+  log "Headscale 网络已就绪：${iface} ${tailnet_ip}"
 }
 
 main() {
@@ -105,14 +109,7 @@ main() {
   persist_env_file
   persist_defaults
 
-  if [[ "$K3S_MAIN_RUN_BOOTSTRAP" == "1" ]]; then
-    run_child "Debian 13 基础初始化" "$(script_path debian13-bootstrap.sh)"
-  fi
-  if [[ "$K3S_MAIN_RUN_CHECK" == "1" ]]; then
-    run_child "Debian 13 初始化校验" "$(script_path debian13-bootstrap-check.sh)"
-  fi
-
-  run_child "接入 Headscale" "$(script_path headscale-client.sh)"
+  check_headscale_dependency
   run_child "部署 k3s 主节点" "$(script_path k3s-server.sh)"
   run_child "记录 k3s 子节点 token" "$(script_path k3s-token.sh)"
 
