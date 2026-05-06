@@ -82,6 +82,7 @@ usage() {
   ALPINE_SPLIT_ROUTE_CIDRS=10.45.153.0/24
   ALPINE_SPLIT_OUTBOUND_PROXY_PORTS=7890/tcp,7891/tcp
   ALPINE_SPLIT_INBOUND_FORWARDS=443/tcp=100.64.0.2:443
+  ALPINE_TAILSCALE_UP_TIMEOUT_SEC=120
 
 说明：
   - 仅支持 Alpine Linux + OpenRC。
@@ -162,6 +163,10 @@ validate_input() {
   validate_bool HEADSCALE_ENABLE_TS_SSH "$HEADSCALE_ENABLE_TS_SSH"
   validate_bool HEADSCALE_RESET "$HEADSCALE_RESET"
   validate_bool ALPINE_ENABLE_COMMUNITY_REPO "$ALPINE_ENABLE_COMMUNITY_REPO"
+  validate_bool ALPINE_ALLOW_INTERACTIVE_LOGIN "$ALPINE_ALLOW_INTERACTIVE_LOGIN"
+  case "$ALPINE_TAILSCALE_UP_TIMEOUT_SEC" in
+    ''|*[!0-9]*) die "ALPINE_TAILSCALE_UP_TIMEOUT_SEC 必须是数字。" ;;
+  esac
 }
 
 require_alpine() {
@@ -190,6 +195,8 @@ apply_defaults() {
   ALPINE_SPLIT_OUTBOUND_PROXY_PORTS="${ALPINE_SPLIT_OUTBOUND_PROXY_PORTS:-}"
   ALPINE_SPLIT_INBOUND_FORWARDS="${ALPINE_SPLIT_INBOUND_FORWARDS:-}"
   ALPINE_PUBLIC_IFACE="${ALPINE_PUBLIC_IFACE:-auto}"
+  ALPINE_ALLOW_INTERACTIVE_LOGIN="${ALPINE_ALLOW_INTERACTIVE_LOGIN:-0}"
+  ALPINE_TAILSCALE_UP_TIMEOUT_SEC="${ALPINE_TAILSCALE_UP_TIMEOUT_SEC:-120}"
 
   case "$HEADSCALE_SERVER_URL" in
     auto|https://headscale.example.com|http://headscale.example.com)
@@ -497,9 +504,14 @@ tailnet_already_up() {
 }
 
 run_tailscale_up() {
+  exit_code=0
+
   if [ "$HEADSCALE_RESET" != 1 ] && tailnet_already_up; then
     log "当前节点已接入 Headscale 网络。"
     return 0
+  fi
+  if [ -z "$HEADSCALE_AUTHKEY" ] && [ "$ALPINE_ALLOW_INTERACTIVE_LOGIN" != 1 ]; then
+    die "请填写 HEADSCALE_AUTHKEY；需要手动网页登录时设置 ALPINE_ALLOW_INTERACTIVE_LOGIN=1。"
   fi
 
   set -- up --login-server "$HEADSCALE_SERVER_URL" "--accept-dns=${HEADSCALE_ACCEPT_DNS}"
@@ -520,7 +532,15 @@ run_tailscale_up() {
   done
 
   log "执行 tailscale up。"
-  tailscale "$@"
+  if command_exists timeout; then
+    timeout "$ALPINE_TAILSCALE_UP_TIMEOUT_SEC" tailscale "$@" || exit_code=$?
+    if [ "$exit_code" -eq 124 ] || [ "$exit_code" -eq 143 ]; then
+      die "tailscale up 超时；请检查 HEADSCALE_AUTHKEY 是否为空、过期或已使用。"
+    fi
+    [ "$exit_code" -eq 0 ] || exit "$exit_code"
+  else
+    tailscale "$@"
+  fi
 }
 
 persist_tailnet_state() {
