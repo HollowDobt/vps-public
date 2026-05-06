@@ -501,9 +501,9 @@ start_tailscaled() {
 
   rc-update add "$HOLLOW_OPENRC_SERVICE" default >/dev/null
   if rc-service "$HOLLOW_OPENRC_SERVICE" status >/dev/null 2>&1; then
-    rc-service "$HOLLOW_OPENRC_SERVICE" restart
+    rc-service "$HOLLOW_OPENRC_SERVICE" restart || warn "${HOLLOW_OPENRC_SERVICE} restart 返回非零，继续按 socket 状态复查。"
   else
-    rc-service "$HOLLOW_OPENRC_SERVICE" start
+    rc-service "$HOLLOW_OPENRC_SERVICE" start || warn "${HOLLOW_OPENRC_SERVICE} start 返回非零，继续按 socket 状态复查。"
   fi
 }
 
