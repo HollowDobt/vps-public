@@ -24,6 +24,9 @@ FLUX_GITHUB_REPO="${FLUX_GITHUB_REPO:-vps-gitops}"
 FLUX_GITHUB_BRANCH="${FLUX_GITHUB_BRANCH:-main}"
 FLUX_GITHUB_PRIVATE="${FLUX_GITHUB_PRIVATE:-1}"
 FLUX_GITHUB_PERSONAL="${FLUX_GITHUB_PERSONAL:-1}"
+FLUX_GIT_AUTH="${FLUX_GIT_AUTH:-ssh}"
+FLUX_GIT_URL="${FLUX_GIT_URL:-}"
+FLUX_GIT_SSH_KEY_FILE="${FLUX_GIT_SSH_KEY_FILE:-/etc/fluxcd/github-deploy.key}"
 FLUX_CLUSTER_NAME="${FLUX_CLUSTER_NAME:-}"
 FLUX_GITHUB_PATH="${FLUX_GITHUB_PATH:-}"
 FLUX_COMPONENTS_EXTRA="${FLUX_COMPONENTS_EXTRA:-}"
@@ -47,10 +50,11 @@ usage() {
   sudo bash $SCRIPT_NAME
 
 必填配置：
-  GITHUB_TOKEN=github_pat_...
   FLUX_GITHUB_OWNER=HollowDobt
 
 常用配置：
+  FLUX_GIT_AUTH=ssh
+  FLUX_GIT_SSH_KEY_FILE=/etc/fluxcd/github-deploy.key
   FLUX_GITHUB_REPO=vps-gitops
   FLUX_GITHUB_BRANCH=main
   FLUX_CLUSTER_NAME=server3
@@ -63,8 +67,14 @@ EOF
 }
 
 validate_input() {
-  [[ -n "$GITHUB_TOKEN" ]] || die "请设置 GITHUB_TOKEN 或 GH_TOKEN。"
   [[ -n "$FLUX_GITHUB_OWNER" ]] || die "请设置 FLUX_GITHUB_OWNER。"
+  case "$FLUX_GIT_AUTH" in
+    ssh | token) ;;
+    *) die "FLUX_GIT_AUTH 只能是 ssh 或 token。" ;;
+  esac
+  if [[ "$FLUX_GIT_AUTH" == "token" ]]; then
+    [[ -n "$GITHUB_TOKEN" ]] || die "FLUX_GIT_AUTH=token 时必须设置 GITHUB_TOKEN 或 GH_TOKEN。"
+  fi
   validate_bool FLUX_GITHUB_PRIVATE "$FLUX_GITHUB_PRIVATE"
   validate_bool FLUX_GITHUB_PERSONAL "$FLUX_GITHUB_PERSONAL"
   validate_bool FLUX_REPO_SCAFFOLD "$FLUX_REPO_SCAFFOLD"
@@ -156,9 +166,90 @@ install_sops() {
 }
 
 install_dependencies() {
-  apt_install ca-certificates curl git jq gnupg age
+  apt_install ca-certificates curl git jq gnupg age openssh-client
   install_flux_cli
   install_sops
+}
+
+ensure_git_ssh_key() {
+  [[ "$FLUX_GIT_AUTH" == "ssh" ]] || return 0
+
+  install -d -o root -g root -m 0700 "$(dirname "$FLUX_GIT_SSH_KEY_FILE")"
+  if [[ ! -s "$FLUX_GIT_SSH_KEY_FILE" ]]; then
+    [[ -n "$GITHUB_TOKEN" ]] || die "缺少 GitHub deploy key：$FLUX_GIT_SSH_KEY_FILE"
+    log "生成 Flux GitHub deploy key。"
+    ssh-keygen -t ed25519 -N '' -C "flux-${FLUX_CLUSTER_NAME}" -f "$FLUX_GIT_SSH_KEY_FILE" >/dev/null
+  fi
+  chmod 0600 "$FLUX_GIT_SSH_KEY_FILE"
+}
+
+github_api() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+  local url="https://api.github.com${path}"
+
+  [[ -n "$GITHUB_TOKEN" ]] || return 1
+  if [[ -n "$body" ]]; then
+    curl -fsSL --request "$method" "$url" \
+      --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+      --header 'Accept: application/vnd.github+json' \
+      --header 'Content-Type: application/json' \
+      --data "$body"
+  else
+    curl -fsSL --request "$method" "$url" \
+      --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+      --header 'Accept: application/vnd.github+json'
+  fi
+}
+
+ensure_github_repo_if_token_available() {
+  local body
+
+  [[ -n "$GITHUB_TOKEN" ]] || return 0
+  [[ "$FLUX_GITHUB_HOSTNAME" == "github.com" ]] || return 0
+
+  if github_api GET "/repos/${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  body="$(jq -nc \
+    --arg name "$FLUX_GITHUB_REPO" \
+    --argjson private "$([[ "$FLUX_GITHUB_PRIVATE" == "1" ]] && printf true || printf false)" \
+    '{name:$name,private:$private,auto_init:false}')"
+
+  log "创建 GitHub GitOps 仓库：${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}"
+  if [[ "$FLUX_GITHUB_PERSONAL" == "1" ]]; then
+    github_api POST /user/repos "$body" >/dev/null
+  else
+    github_api POST "/orgs/${FLUX_GITHUB_OWNER}/repos" "$body" >/dev/null
+  fi
+}
+
+ensure_github_deploy_key_if_token_available() {
+  local public_key_file="${FLUX_GIT_SSH_KEY_FILE}.pub"
+  local public_key
+  local keys
+  local body
+
+  [[ "$FLUX_GIT_AUTH" == "ssh" ]] || return 0
+  [[ -n "$GITHUB_TOKEN" ]] || return 0
+  [[ "$FLUX_GITHUB_HOSTNAME" == "github.com" ]] || return 0
+  [[ -r "$public_key_file" ]] || die "缺少 deploy key 公钥：$public_key_file"
+
+  public_key="$(awk 'NF { print; exit }' "$public_key_file")"
+  keys="$(github_api GET "/repos/${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}/keys")"
+  if jq -e --arg key "$public_key" '.[] | select(.key == $key)' <<<"$keys" >/dev/null; then
+    return 0
+  fi
+
+  body="$(jq -nc \
+    --arg title "flux-${FLUX_CLUSTER_NAME}" \
+    --arg key "$public_key" \
+    '{title:$title,key:$key,read_only:false}')"
+
+  log "写入 GitHub deploy key：${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}"
+  github_api POST "/repos/${FLUX_GITHUB_OWNER}/${FLUX_GITHUB_REPO}/keys" "$body" >/dev/null
 }
 
 ensure_age_key() {
@@ -177,6 +268,8 @@ ensure_age_key() {
 persist_flux_config() {
   persist_env_value FLUX_CLUSTER_NAME "$FLUX_CLUSTER_NAME"
   persist_env_value FLUX_GITHUB_PATH "$FLUX_GITHUB_PATH"
+  persist_env_value FLUX_GIT_AUTH "$FLUX_GIT_AUTH"
+  persist_env_value FLUX_GIT_SSH_KEY_FILE "$FLUX_GIT_SSH_KEY_FILE"
   persist_env_value FLUX_AGE_KEY_FILE "$FLUX_AGE_KEY_FILE"
   if [[ -n "$FLUX_AGE_PUBLIC_KEY" ]]; then
     persist_env_value FLUX_AGE_PUBLIC_KEY "$FLUX_AGE_PUBLIC_KEY"
@@ -197,28 +290,40 @@ ensure_sops_secret() {
 flux_bootstrap() {
   local args=()
 
-  args=(bootstrap github
-    --token-auth
-    --hostname "$FLUX_GITHUB_HOSTNAME"
-    --owner "$FLUX_GITHUB_OWNER"
-    --repository "$FLUX_GITHUB_REPO"
-    --branch "$FLUX_GITHUB_BRANCH"
-    --path "$FLUX_GITHUB_PATH")
-
-  if [[ "$FLUX_GITHUB_PRIVATE" == "1" ]]; then
-    args+=(--private=true)
+  if [[ "$FLUX_GIT_AUTH" == "ssh" ]]; then
+    args=(bootstrap git
+      --url "$(git_clone_url)"
+      --branch "$FLUX_GITHUB_BRANCH"
+      --path "$FLUX_GITHUB_PATH"
+      --private-key-file "$FLUX_GIT_SSH_KEY_FILE")
   else
-    args+=(--private=false)
-  fi
-  if [[ "$FLUX_GITHUB_PERSONAL" == "1" ]]; then
-    args+=(--personal)
+    args=(bootstrap github
+      --token-auth
+      --hostname "$FLUX_GITHUB_HOSTNAME"
+      --owner "$FLUX_GITHUB_OWNER"
+      --repository "$FLUX_GITHUB_REPO"
+      --branch "$FLUX_GITHUB_BRANCH"
+      --path "$FLUX_GITHUB_PATH")
+
+    if [[ "$FLUX_GITHUB_PRIVATE" == "1" ]]; then
+      args+=(--private=true)
+    else
+      args+=(--private=false)
+    fi
+    if [[ "$FLUX_GITHUB_PERSONAL" == "1" ]]; then
+      args+=(--personal)
+    fi
   fi
   if [[ -n "$FLUX_COMPONENTS_EXTRA" ]]; then
     args+=(--components-extra "$FLUX_COMPONENTS_EXTRA")
   fi
 
-  log "执行 Flux GitHub bootstrap。"
-  GITHUB_TOKEN="$GITHUB_TOKEN" flux "${args[@]}"
+  log "执行 Flux bootstrap。"
+  if [[ "$FLUX_GIT_AUTH" == "token" ]]; then
+    GITHUB_TOKEN="$GITHUB_TOKEN" flux "${args[@]}"
+  else
+    flux "${args[@]}"
+  fi
 }
 
 write_file() {
@@ -239,7 +344,13 @@ write_file_if_absent() {
 }
 
 git_clone_url() {
-  printf 'https://%s/%s/%s.git\n' "$FLUX_GITHUB_HOSTNAME" "$FLUX_GITHUB_OWNER" "$FLUX_GITHUB_REPO"
+  if [[ -n "$FLUX_GIT_URL" ]]; then
+    printf '%s\n' "$FLUX_GIT_URL"
+  elif [[ "$FLUX_GIT_AUTH" == "ssh" ]]; then
+    printf 'ssh://git@%s/%s/%s.git\n' "$FLUX_GITHUB_HOSTNAME" "$FLUX_GITHUB_OWNER" "$FLUX_GITHUB_REPO"
+  else
+    printf 'https://%s/%s/%s.git\n' "$FLUX_GITHUB_HOSTNAME" "$FLUX_GITHUB_OWNER" "$FLUX_GITHUB_REPO"
+  fi
 }
 
 git_with_token_env() {
@@ -256,6 +367,34 @@ EOF
   chmod 0700 "$askpass"
 }
 
+git_ssh_command() {
+  printf 'ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new' "$(shell_quote "$FLUX_GIT_SSH_KEY_FILE")"
+}
+
+git_clone_repo() {
+  local worktree="$1"
+  local askpass="$2"
+
+  if [[ "$FLUX_GIT_AUTH" == "ssh" ]]; then
+    GIT_SSH_COMMAND="$(git_ssh_command)" git clone --branch "$FLUX_GITHUB_BRANCH" "$(git_clone_url)" "$worktree"
+  else
+    GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$GITHUB_TOKEN" \
+      git clone --branch "$FLUX_GITHUB_BRANCH" "$(git_clone_url)" "$worktree"
+  fi
+}
+
+git_push_repo() {
+  local worktree="$1"
+  local askpass="$2"
+
+  if [[ "$FLUX_GIT_AUTH" == "ssh" ]]; then
+    GIT_SSH_COMMAND="$(git_ssh_command)" git -C "$worktree" push origin "$FLUX_GITHUB_BRANCH"
+  else
+    GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$GITHUB_TOKEN" \
+      git -C "$worktree" push origin "$FLUX_GITHUB_BRANCH"
+  fi
+}
+
 scaffold_repo() {
   local worktree
   local askpass
@@ -266,11 +405,12 @@ scaffold_repo() {
   worktree="$(mktemp -d "${STATE_DIR}/tmp/repo.XXXXXX")"
   askpass="$(mktemp_managed)"
   track_tempfile "$worktree"
-  git_with_token_env "$askpass"
+  if [[ "$FLUX_GIT_AUTH" == "token" ]]; then
+    git_with_token_env "$askpass"
+  fi
 
   log "拉取 GitOps 仓库并写入基础目录。"
-  GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$GITHUB_TOKEN" \
-    git clone --branch "$FLUX_GITHUB_BRANCH" "$(git_clone_url)" "$worktree"
+  git_clone_repo "$worktree" "$askpass"
 
   git -C "$worktree" config user.name "${FLUX_GIT_COMMIT_NAME:-hlwdot-bot}"
   git -C "$worktree" config user.email "${FLUX_GIT_COMMIT_EMAIL:-ops@hlwdot.local}"
@@ -415,8 +555,7 @@ EOF
     log "GitOps 仓库没有新的基础目录变更。"
   else
     git -C "$worktree" commit -m "gitops: initialize ${FLUX_CLUSTER_NAME}"
-    GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$GITHUB_TOKEN" \
-      git -C "$worktree" push origin "$FLUX_GITHUB_BRANCH"
+    git_push_repo "$worktree" "$askpass"
   fi
 }
 
@@ -463,6 +602,9 @@ main() {
   persist_flux_config
   install_dependencies
   flux check --pre
+  ensure_git_ssh_key
+  ensure_github_repo_if_token_available
+  ensure_github_deploy_key_if_token_available
   ensure_age_key
   persist_flux_config
   flux_bootstrap
