@@ -17,6 +17,7 @@ MENU_LABELS=(
   "部署 Headscale 主节点"
   "签发 Headscale 接入密钥"
   "接入 Headscale 网络"
+  "Alpine 小鸡接入 hollow-net"
   "部署 k3s 主节点"
   "全流程：作为子节点并入网络"
   "部署 k3s 子节点"
@@ -41,6 +42,7 @@ MENU_GROUPS=(
   "并入集群配置"
   "并入集群配置"
   "并入集群配置"
+  "并入集群配置"
 )
 MENU_HINTS=(
   "启动 Debian 13 重装"
@@ -49,6 +51,7 @@ MENU_HINTS=(
   "安装 Headscale、配置 DNS/Caddy、本机接入，不跑基础初始化"
   "给新节点使用的一次性 key"
   "当前节点加入 hollow-net"
+  "只接入 hollow-net，可上报分流路由，不部署 k3s"
   "检查 hollow-net，部署 server、记录 token、部署 GitOps"
   "建议先执行系统重装；初始化、接入 hollow-net、部署 k3s 子节点"
   "检查 hollow-net，部署 agent"
@@ -58,8 +61,8 @@ MENU_HINTS=(
   "加密并上传 k3s/Flux 状态"
   "返回 shell"
 )
-MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "0")
-MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-authkey" "headscale-client" "k3s-main-node" "k3s-worker-full-node" "k3s-worker-node" "flux-gitops" "k3s-token" "backup-headscale" "backup-k3s" "exit")
+MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "0")
+MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-authkey" "headscale-client" "alpine-hollow-client" "k3s-main-node" "k3s-worker-full-node" "k3s-worker-node" "flux-gitops" "k3s-token" "backup-headscale" "backup-k3s" "exit")
 
 ITEM_LINES=()
 MENU_END_LINE=1
@@ -130,6 +133,19 @@ run_script() {
 
   printf '\n%s执行：%s %s%s\n\n' "$C_DIM" "$file" "$*" "$C_RESET"
   bash "$file" "$@"
+}
+
+run_sh_script() {
+  local file="$1"
+  shift || true
+
+  [[ -r "$file" ]] || {
+    log_error "找不到脚本：$file"
+    return 1
+  }
+
+  printf '\n%s执行：%s %s%s\n\n' "$C_DIM" "$file" "$*" "$C_RESET"
+  sh "$file" "$@"
 }
 
 run_bootstrap_with_check() {
@@ -349,6 +365,15 @@ run_selected_action() {
         return 0
       }
       run_script "$(script_path headscale-client.sh)" || true
+      pause_return
+      ;;
+    alpine-hollow-client)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_sh_script "$(script_path alpine-hollow-client.sh)" || true
       pause_return
       ;;
     k3s-server)

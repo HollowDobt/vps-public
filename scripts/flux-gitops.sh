@@ -453,7 +453,7 @@ scaffold_repo() {
   git -C "$worktree" config user.email "${FLUX_GIT_COMMIT_EMAIL:-ops@hlwdot.local}"
 
   cluster_dir="${worktree}/${FLUX_GITHUB_PATH}"
-  install -d -m 0755 "$cluster_dir" "${worktree}/infrastructure" "${worktree}/apps/examples/podinfo"
+  install -d -m 0755 "$cluster_dir" "${worktree}/infrastructure" "${worktree}/apps/examples/podinfo" "${worktree}/apps/examples/placement"
 
   write_file_if_absent "${worktree}/.sops.yaml" <<EOF
 creation_rules:
@@ -572,6 +572,57 @@ EOF
 # examples
 
 这里的示例默认不会部署。确认要启用后，把对应目录加入 `apps/kustomization.yaml` 的 `resources`。
+EOF
+
+  write_file_if_absent "${worktree}/apps/examples/placement/README.md" <<'EOF'
+# placement
+
+服务允许部署在哪些 VPS 上，直接写在 Pod 模板里。
+
+固定到单台 VPS：
+
+```yaml
+spec:
+  template:
+    spec:
+      nodeName: server999.center
+```
+
+允许部署到多台 VPS：
+
+```yaml
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values:
+                      - server999.center
+                      - server3.headscale
+```
+
+HelmRelease 里如果 chart 支持 `affinity`，放到 `values`：
+
+```yaml
+spec:
+  values:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchFields:
+                - key: metadata.name
+                  operator: In
+                  values:
+                    - server999.center
+```
+
+带本地数据盘的服务同时指定 PVC/StorageClass，不要只指定节点。
 EOF
 
   write_file_if_absent "${worktree}/README.md" <<EOF
