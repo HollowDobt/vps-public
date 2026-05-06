@@ -453,6 +453,8 @@ configure_k3s_ufw_rules() {
   ufw_allow_in_on_iface "$iface" 10250 tcp 'k3s kubelet'
   ufw allow from "$cluster_cidr" to any comment 'k3s pods'
   ufw allow from "$service_cidr" to any comment 'k3s services'
+  ufw route allow from "$cluster_cidr" to any comment 'k3s pod routes'
+  ufw route allow from "$service_cidr" to any comment 'k3s service routes'
 }
 
 systemd_reload() {
