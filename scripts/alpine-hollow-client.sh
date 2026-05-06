@@ -78,10 +78,14 @@ usage() {
   HEADSCALE_AUTHKEY=tskey-auth-...
   HEADSCALE_CLIENT_HOSTNAME=alpine-edge-1
   HOLLOW_NET_IFACE=hollow-net
+  ALPINE_TAILSCALE_INSTALL_SOURCE=auto
+  ALPINE_TAILSCALE_MIN_VERSION=1.74.0
   ALPINE_SPLIT_DIRECTION=none
   ALPINE_SPLIT_ROUTE_CIDRS=10.45.153.0/24
   ALPINE_SPLIT_OUTBOUND_PROXY_PORTS=7890/tcp,7891/tcp
   ALPINE_SPLIT_INBOUND_FORWARDS=443/tcp=100.64.0.2:443
+  HEADSCALE_ENDPOINT_CHECK=1
+  HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC=15
   ALPINE_TAILSCALE_UP_TIMEOUT_SEC=120
 
 说明：
@@ -162,8 +166,21 @@ validate_input() {
   esac
   validate_bool HEADSCALE_ENABLE_TS_SSH "$HEADSCALE_ENABLE_TS_SSH"
   validate_bool HEADSCALE_RESET "$HEADSCALE_RESET"
+  validate_bool HEADSCALE_ENDPOINT_CHECK "$HEADSCALE_ENDPOINT_CHECK"
   validate_bool ALPINE_ENABLE_COMMUNITY_REPO "$ALPINE_ENABLE_COMMUNITY_REPO"
   validate_bool ALPINE_ALLOW_INTERACTIVE_LOGIN "$ALPINE_ALLOW_INTERACTIVE_LOGIN"
+  validate_bool ALPINE_KILL_STALE_TAILSCALE_UP "$ALPINE_KILL_STALE_TAILSCALE_UP"
+  case "$ALPINE_TAILSCALE_INSTALL_SOURCE" in
+    auto|static|apk) ;;
+    *) die "ALPINE_TAILSCALE_INSTALL_SOURCE 只能是 auto、static 或 apk。" ;;
+  esac
+  case "$ALPINE_TAILSCALE_MIN_VERSION" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) die "ALPINE_TAILSCALE_MIN_VERSION 格式错误。" ;;
+  esac
+  case "$HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC" in
+    ''|*[!0-9]*) die "HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC 必须是数字。" ;;
+  esac
   case "$ALPINE_TAILSCALE_UP_TIMEOUT_SEC" in
     ''|*[!0-9]*) die "ALPINE_TAILSCALE_UP_TIMEOUT_SEC 必须是数字。" ;;
   esac
@@ -186,7 +203,12 @@ apply_defaults() {
   HEADSCALE_ENABLE_TS_SSH="${HEADSCALE_ENABLE_TS_SSH:-0}"
   HEADSCALE_RESET="${HEADSCALE_RESET:-0}"
   HEADSCALE_EXTRA_UP_ARGS="${HEADSCALE_EXTRA_UP_ARGS:-}"
+  HEADSCALE_ENDPOINT_CHECK="${HEADSCALE_ENDPOINT_CHECK:-1}"
+  HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC="${HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC:-15}"
   HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
+  ALPINE_TAILSCALE_INSTALL_SOURCE="${ALPINE_TAILSCALE_INSTALL_SOURCE:-auto}"
+  ALPINE_TAILSCALE_MIN_VERSION="${ALPINE_TAILSCALE_MIN_VERSION:-1.74.0}"
+  ALPINE_TAILSCALE_STATIC_URL="${ALPINE_TAILSCALE_STATIC_URL:-auto}"
   ALPINE_ENABLE_COMMUNITY_REPO="${ALPINE_ENABLE_COMMUNITY_REPO:-1}"
   ALPINE_COMMUNITY_REPO_URL="${ALPINE_COMMUNITY_REPO_URL:-auto}"
   ALPINE_ENABLE_FORWARDING="${ALPINE_ENABLE_FORWARDING:-auto}"
@@ -196,6 +218,7 @@ apply_defaults() {
   ALPINE_SPLIT_INBOUND_FORWARDS="${ALPINE_SPLIT_INBOUND_FORWARDS:-}"
   ALPINE_PUBLIC_IFACE="${ALPINE_PUBLIC_IFACE:-auto}"
   ALPINE_ALLOW_INTERACTIVE_LOGIN="${ALPINE_ALLOW_INTERACTIVE_LOGIN:-0}"
+  ALPINE_KILL_STALE_TAILSCALE_UP="${ALPINE_KILL_STALE_TAILSCALE_UP:-1}"
   ALPINE_TAILSCALE_UP_TIMEOUT_SEC="${ALPINE_TAILSCALE_UP_TIMEOUT_SEC:-120}"
 
   case "$HEADSCALE_SERVER_URL" in
@@ -265,8 +288,130 @@ ensure_community_repo() {
 install_packages() {
   ensure_community_repo
   apk update
-  apk add ca-certificates openrc iptables iproute2 tailscale tailscale-openrc
+  if [ "$ALPINE_TAILSCALE_INSTALL_SOURCE" = apk ]; then
+    apk add ca-certificates curl openrc openssl tar iptables iproute2 tailscale tailscale-openrc
+  else
+    apk add ca-certificates curl openrc openssl tar iptables iproute2
+  fi
   command_exists update-ca-certificates && update-ca-certificates >/dev/null 2>&1 || true
+}
+
+tailscale_version_number() {
+  command_exists tailscale || return 1
+  tailscale version 2>/dev/null | awk 'NR == 1 { print $1; exit }'
+}
+
+version_ge() {
+  current="$1"
+  minimum="$2"
+  current_major=${current%%.*}
+  rest=${current#*.}
+  current_minor=${rest%%.*}
+  current_patch=${rest#*.}
+  current_patch=${current_patch%%[!0-9]*}
+
+  minimum_major=${minimum%%.*}
+  rest=${minimum#*.}
+  minimum_minor=${rest%%.*}
+  minimum_patch=${rest#*.}
+  minimum_patch=${minimum_patch%%[!0-9]*}
+
+  [ "${current_major:-0}" -gt "${minimum_major:-0}" ] && return 0
+  [ "${current_major:-0}" -lt "${minimum_major:-0}" ] && return 1
+  [ "${current_minor:-0}" -gt "${minimum_minor:-0}" ] && return 0
+  [ "${current_minor:-0}" -lt "${minimum_minor:-0}" ] && return 1
+  [ "${current_patch:-0}" -ge "${minimum_patch:-0}" ]
+}
+
+tailscale_static_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'amd64\n' ;;
+    aarch64|arm64) printf 'arm64\n' ;;
+    armv7l|armv6l) printf 'arm\n' ;;
+    i386|i686) printf '386\n' ;;
+    *) die "当前架构不支持 Tailscale 静态包：$(uname -m)" ;;
+  esac
+}
+
+download_to_file() {
+  url="$1"
+  output="$2"
+
+  if command_exists curl; then
+    curl -fsSL --retry 3 --connect-timeout 15 "$url" -o "$output"
+  elif command_exists wget; then
+    wget -q --tries=3 --timeout=15 -O "$output" "$url"
+  else
+    die "缺少 curl 或 wget，无法下载：$url"
+  fi
+}
+
+resolve_tailscale_static_url() {
+  arch=$(tailscale_static_arch)
+  page="${TMP_DIR}/${SCRIPT_NAME}.$$.tailscale-packages.html"
+  url=''
+
+  if [ "$ALPINE_TAILSCALE_STATIC_URL" != auto ]; then
+    printf '%s\n' "$ALPINE_TAILSCALE_STATIC_URL"
+    return 0
+  fi
+
+  download_to_file https://pkgs.tailscale.com/stable/ "$page"
+  url=$(
+    grep -Eo "tailscale_[0-9][0-9.]*_${arch}[.]tgz" "$page" |
+      awk 'NF { print "https://pkgs.tailscale.com/stable/" $0; exit }'
+  )
+  [ -n "$url" ] || die "无法解析 Tailscale 静态包下载地址。"
+  printf '%s\n' "$url"
+}
+
+install_tailscale_static() {
+  url=$(resolve_tailscale_static_url)
+  tgz="${TMP_DIR}/${SCRIPT_NAME}.$$.tailscale.tgz"
+  sum_file="${TMP_DIR}/${SCRIPT_NAME}.$$.tailscale.tgz.sha256"
+  unpack_dir="${TMP_DIR}/${SCRIPT_NAME}.$$.tailscale"
+  bin_dir=''
+  version=''
+
+  log "下载 Tailscale 静态包：$url"
+  download_to_file "$url" "$tgz"
+  if command_exists sha256sum && download_to_file "${url}.sha256" "$sum_file"; then
+    expected=$(awk 'NF { print $1; exit }' "$sum_file")
+    actual=$(sha256sum "$tgz" | awk '{ print $1 }')
+    [ "$expected" = "$actual" ] || die "Tailscale 静态包校验失败。"
+  fi
+
+  mkdir -p "$unpack_dir"
+  tar -xzf "$tgz" -C "$unpack_dir"
+  bin_dir=$(find "$unpack_dir" -mindepth 1 -maxdepth 1 -type d -name 'tailscale_*' | head -n 1)
+  [ -x "${bin_dir}/tailscale" ] && [ -x "${bin_dir}/tailscaled" ] || die "Tailscale 静态包内容不完整。"
+
+  version=$(basename "$bin_dir" | sed -E 's/^tailscale_([0-9.]+)_.*/\1/')
+  mkdir -p "/usr/local/lib/tailscale-${version}" /usr/local/bin /usr/local/sbin
+  cp "$bin_dir/tailscale" "/usr/local/lib/tailscale-${version}/tailscale"
+  cp "$bin_dir/tailscaled" "/usr/local/lib/tailscale-${version}/tailscaled"
+  chmod 0755 "/usr/local/lib/tailscale-${version}/tailscale" "/usr/local/lib/tailscale-${version}/tailscaled"
+  ln -sf "/usr/local/lib/tailscale-${version}/tailscale" /usr/local/bin/tailscale
+  ln -sf "/usr/local/lib/tailscale-${version}/tailscaled" /usr/local/sbin/tailscaled
+  log "已安装 Tailscale 静态包：v${version}"
+}
+
+ensure_tailscale_version() {
+  current=''
+
+  current=$(tailscale_version_number || true)
+  if [ -n "$current" ] && version_ge "$current" "$ALPINE_TAILSCALE_MIN_VERSION"; then
+    log "Tailscale 版本满足要求：v${current}"
+    return 0
+  fi
+
+  if [ "$ALPINE_TAILSCALE_INSTALL_SOURCE" = apk ]; then
+    die "当前 Tailscale 版本 ${current:-未安装} 低于 ${ALPINE_TAILSCALE_MIN_VERSION}；请使用 ALPINE_TAILSCALE_INSTALL_SOURCE=auto 或 static。"
+  fi
+
+  install_tailscale_static
+  current=$(tailscale_version_number || true)
+  [ -n "$current" ] && version_ge "$current" "$ALPINE_TAILSCALE_MIN_VERSION" || die "Tailscale 版本仍低于 ${ALPINE_TAILSCALE_MIN_VERSION}。"
 }
 
 configure_tun_module() {
@@ -434,7 +579,10 @@ write_split_rules_script() {
       ;;
   esac
 
-  [ "$need_rules" = 1 ] || return 0
+  if [ "$need_rules" != 1 ]; then
+    cleanup_split_rules
+    return 0
+  fi
   [ -n "$public_iface" ] || die "无法自动识别公网网卡，请设置 ALPINE_PUBLIC_IFACE。"
 
   mkdir -p /etc/local.d
@@ -497,10 +645,176 @@ write_split_rules_script() {
   log "已配置 Headscale 网络分流规则：${ALPINE_SPLIT_DIRECTION}"
 }
 
+cleanup_split_rules() {
+  removed=0
+
+  if [ -e "$SPLIT_LOCAL_SCRIPT" ]; then
+    rm -f "$SPLIT_LOCAL_SCRIPT"
+    removed=1
+  fi
+  if command_exists iptables; then
+    iptables -D INPUT -j HLWDOT_SPLIT_INPUT 2>/dev/null || true
+    iptables -D FORWARD -j HLWDOT_SPLIT_FORWARD 2>/dev/null || true
+    iptables -t nat -D PREROUTING -j HLWDOT_SPLIT_PREROUTING 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -j HLWDOT_SPLIT_POSTROUTING 2>/dev/null || true
+    iptables -F HLWDOT_SPLIT_INPUT 2>/dev/null || true
+    iptables -F HLWDOT_SPLIT_FORWARD 2>/dev/null || true
+    iptables -t nat -F HLWDOT_SPLIT_PREROUTING 2>/dev/null || true
+    iptables -t nat -F HLWDOT_SPLIT_POSTROUTING 2>/dev/null || true
+    iptables -X HLWDOT_SPLIT_INPUT 2>/dev/null || true
+    iptables -X HLWDOT_SPLIT_FORWARD 2>/dev/null || true
+    iptables -t nat -X HLWDOT_SPLIT_PREROUTING 2>/dev/null || true
+    iptables -t nat -X HLWDOT_SPLIT_POSTROUTING 2>/dev/null || true
+  fi
+  [ "$removed" = 1 ] && log "已清理旧的 Headscale 网络分流规则。"
+}
+
+split_rules_enabled() {
+  case "$ALPINE_SPLIT_DIRECTION" in
+    outbound|both)
+      [ -n "$ALPINE_SPLIT_OUTBOUND_PROXY_PORTS" ] && return 0
+      ;;
+  esac
+  case "$ALPINE_SPLIT_DIRECTION" in
+    inbound|both)
+      [ -n "$ALPINE_SPLIT_INBOUND_FORWARDS" ] && return 0
+      ;;
+  esac
+  return 1
+}
+
 tailnet_already_up() {
   command_exists tailscale || return 1
   tailscale status --self >/dev/null 2>&1 || return 1
   [ -n "$(tailscale ip -4 2>/dev/null | awk 'NF { print; exit }')" ]
+}
+
+url_host() {
+  value="$1"
+  value=${value#*://}
+  value=${value%%/*}
+  value=${value%%:*}
+  printf '%s\n' "$value"
+}
+
+url_scheme() {
+  value="$1"
+  printf '%s\n' "${value%%://*}"
+}
+
+headscale_key_url() {
+  value=${HEADSCALE_SERVER_URL%/}
+  printf '%s/key?v=133\n' "$value"
+}
+
+check_headscale_certificate_name() {
+  host=$(url_host "$HEADSCALE_SERVER_URL")
+  scheme=$(url_scheme "$HEADSCALE_SERVER_URL")
+  cert_subject=''
+
+  [ "$scheme" = https ] || return 0
+  [ -n "$host" ] || return 0
+  command_exists openssl || return 0
+
+  cert_subject=$(
+    printf '\n' |
+      openssl s_client -connect "${host}:443" -servername "$host" -showcerts 2>/dev/null |
+      openssl x509 -noout -subject 2>/dev/null || true
+  )
+
+  case "$cert_subject" in
+    *"TRAEFIK DEFAULT CERT"*)
+      die "Headscale 入口当前返回 TRAEFIK DEFAULT CERT，请先重新执行 Headscale 主节点部署脚本修正 HTTPS 入口。"
+      ;;
+  esac
+}
+
+check_headscale_endpoint() {
+  url=$(headscale_key_url)
+  err_file="${TMP_DIR}/${SCRIPT_NAME}.$$.headscale-endpoint.err"
+  out_file="${TMP_DIR}/${SCRIPT_NAME}.$$.headscale-endpoint.out"
+
+  [ "$HEADSCALE_ENDPOINT_CHECK" = 1 ] || return 0
+
+  check_headscale_certificate_name
+
+  if command_exists curl; then
+    if curl -fsSL \
+      --connect-timeout "$HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC" \
+      --max-time "$HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC" \
+      "$url" -o "$out_file" 2>"$err_file"; then
+      log "Headscale 入口检查通过：$url"
+      return 0
+    fi
+  elif command_exists wget; then
+    if wget -q -T "$HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC" -O "$out_file" "$url" 2>"$err_file"; then
+      log "Headscale 入口检查通过：$url"
+      return 0
+    fi
+  else
+    die "缺少 curl 或 wget，无法检查 Headscale 入口。"
+  fi
+
+  if grep -q 'TRAEFIK DEFAULT CERT' "$err_file" 2>/dev/null; then
+    die "Headscale 入口返回 TRAEFIK DEFAULT CERT，请重新执行 Headscale 主节点部署脚本。"
+  fi
+
+  err_text=$(sed -n '1,3p' "$err_file" 2>/dev/null | tr '\n' ' ')
+  die "Headscale 入口不可用：$url ${err_text}"
+}
+
+stop_stale_tailscale_up() {
+  pids=''
+
+  [ "$ALPINE_KILL_STALE_TAILSCALE_UP" = 1 ] || return 0
+  command_exists ps || return 0
+
+  pids=$(
+    ps w 2>/dev/null |
+      awk -v self="$$" '$0 ~ /[t]ailscale[[:space:]]+up/ && $1 != self { print $1 }' || true
+  )
+  [ -n "$pids" ] || return 0
+
+  warn "检测到未结束的 tailscale up，正在停止后重试。"
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 2
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+run_with_timeout() {
+  timeout_seconds="$1"
+  shift
+  child_pid=''
+  elapsed=0
+  exit_code=0
+
+  if command_exists timeout; then
+    timeout "$timeout_seconds" "$@" || return $?
+    return 0
+  fi
+
+  "$@" &
+  child_pid=$!
+  while kill -0 "$child_pid" 2>/dev/null; do
+    if [ "$elapsed" -ge "$timeout_seconds" ]; then
+      kill "$child_pid" 2>/dev/null || true
+      sleep 2
+      kill -0 "$child_pid" 2>/dev/null && kill -KILL "$child_pid" 2>/dev/null || true
+      wait "$child_pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  wait "$child_pid" || exit_code=$?
+  return "$exit_code"
 }
 
 run_tailscale_up() {
@@ -514,7 +828,7 @@ run_tailscale_up() {
     die "请填写 HEADSCALE_AUTHKEY；需要手动网页登录时设置 ALPINE_ALLOW_INTERACTIVE_LOGIN=1。"
   fi
 
-  set -- up --login-server "$HEADSCALE_SERVER_URL" "--accept-dns=${HEADSCALE_ACCEPT_DNS}"
+  set -- up --login-server "$HEADSCALE_SERVER_URL" "--accept-dns=${HEADSCALE_ACCEPT_DNS}" "--timeout=${ALPINE_TAILSCALE_UP_TIMEOUT_SEC}s"
   [ -n "$HEADSCALE_AUTHKEY" ] && set -- "$@" --auth-key "$HEADSCALE_AUTHKEY"
   [ -n "$HEADSCALE_CLIENT_HOSTNAME" ] && set -- "$@" --hostname "$HEADSCALE_CLIENT_HOSTNAME"
   if [ -n "$HEADSCALE_ADVERTISE_ROUTES" ]; then
@@ -531,15 +845,40 @@ run_tailscale_up() {
     set -- "$@" "$extra"
   done
 
+  stop_stale_tailscale_up
+  check_headscale_endpoint
   log "执行 tailscale up。"
-  if command_exists timeout; then
-    timeout "$ALPINE_TAILSCALE_UP_TIMEOUT_SEC" tailscale "$@" || exit_code=$?
-    if [ "$exit_code" -eq 124 ] || [ "$exit_code" -eq 143 ]; then
-      die "tailscale up 超时；请检查 HEADSCALE_AUTHKEY 是否为空、过期或已使用。"
+  run_with_timeout "$ALPINE_TAILSCALE_UP_TIMEOUT_SEC" tailscale "$@" || exit_code=$?
+  if [ "$exit_code" -eq 124 ] || [ "$exit_code" -eq 143 ]; then
+    die "tailscale up 超时；请检查 HEADSCALE_AUTHKEY 是否过期、已使用，或 Headscale 入口是否可达。"
+  fi
+  [ "$exit_code" -eq 0 ] || exit "$exit_code"
+}
+
+verify_tailnet_ready() {
+  ip4=''
+
+  tailscale status --self >/dev/null 2>&1 || die "tailscale 状态未就绪。"
+  ip4=$(tailscale ip -4 2>/dev/null | awk 'NF { print; exit }' || true)
+  [ -n "$ip4" ] || die "未获取到 Headscale IPv4 地址。"
+  if command_exists ip; then
+    ip link show "$HOLLOW_NET_IFACE" >/dev/null 2>&1 || die "未找到网卡 $HOLLOW_NET_IFACE。"
+  fi
+}
+
+verify_reboot_persistence() {
+  if ! rc-update show default 2>/dev/null | awk -v svc="$HOLLOW_OPENRC_SERVICE" '$1 == svc { found = 1 } END { exit found ? 0 : 1 }'; then
+    die "${HOLLOW_OPENRC_SERVICE} 未加入 default 运行级别，主机重启后不会自动接入。"
+  fi
+
+  rc-service "$HOLLOW_OPENRC_SERVICE" status >/dev/null 2>&1 || die "${HOLLOW_OPENRC_SERVICE} 未运行。"
+  [ -s /var/lib/tailscale/tailscaled.state ] || die "缺少 /var/lib/tailscale/tailscaled.state，主机重启后无法保持登录状态。"
+
+  if split_rules_enabled; then
+    [ -x "$SPLIT_LOCAL_SCRIPT" ] || die "分流规则未写入 $SPLIT_LOCAL_SCRIPT。"
+    if ! rc-update show default 2>/dev/null | awk '$1 == "local" { found = 1 } END { exit found ? 0 : 1 }'; then
+      die "local 服务未加入 default 运行级别，主机重启后分流规则不会自动恢复。"
     fi
-    [ "$exit_code" -eq 0 ] || exit "$exit_code"
-  else
-    tailscale "$@"
   fi
 }
 
@@ -587,6 +926,7 @@ main() {
   recover_previous_run
   begin_run
   install_packages
+  ensure_tailscale_version
   configure_tun_module
   write_openrc_service
   start_tailscaled
@@ -594,6 +934,8 @@ main() {
   configure_forwarding_if_needed
   write_split_rules_script
   run_tailscale_up
+  verify_tailnet_ready
+  verify_reboot_persistence
   persist_tailnet_state
   print_summary
   finish_run

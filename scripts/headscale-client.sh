@@ -31,6 +31,9 @@ HEADSCALE_ADVERTISE_EXIT_NODE="${HEADSCALE_ADVERTISE_EXIT_NODE:-0}"
 HEADSCALE_ENABLE_TS_SSH="${HEADSCALE_ENABLE_TS_SSH:-0}"
 HEADSCALE_RESET="${HEADSCALE_RESET:-0}"
 HEADSCALE_EXTRA_UP_ARGS="${HEADSCALE_EXTRA_UP_ARGS:-}"
+HEADSCALE_ENDPOINT_CHECK="${HEADSCALE_ENDPOINT_CHECK:-1}"
+HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC="${HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC:-15}"
+HEADSCALE_CLIENT_UP_TIMEOUT_SEC="${HEADSCALE_CLIENT_UP_TIMEOUT_SEC:-120}"
 HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
 HOLLOW_NET_UFW_ALLOW="${HOLLOW_NET_UFW_ALLOW:-1}"
 K3S_NODE_NAME="${K3S_NODE_NAME:-}"
@@ -62,7 +65,10 @@ validate_input() {
   validate_bool HEADSCALE_ADVERTISE_EXIT_NODE "$HEADSCALE_ADVERTISE_EXIT_NODE"
   validate_bool HEADSCALE_ENABLE_TS_SSH "$HEADSCALE_ENABLE_TS_SSH"
   validate_bool HEADSCALE_RESET "$HEADSCALE_RESET"
+  validate_bool HEADSCALE_ENDPOINT_CHECK "$HEADSCALE_ENDPOINT_CHECK"
   validate_bool HOLLOW_NET_UFW_ALLOW "$HOLLOW_NET_UFW_ALLOW"
+  [[ "$HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die "HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC 必须是数字。"
+  [[ "$HEADSCALE_CLIENT_UP_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die "HEADSCALE_CLIENT_UP_TIMEOUT_SEC 必须是数字。"
 }
 
 resolve_server_url() {
@@ -157,9 +163,84 @@ tailnet_already_up() {
   [[ -n "$(tailscale_ipv4)" ]]
 }
 
+headscale_key_url() {
+  printf '%s/key?v=133\n' "${HEADSCALE_SERVER_URL%/}"
+}
+
+check_headscale_certificate_name() {
+  local host
+  local scheme
+  local cert_subject
+
+  scheme="${HEADSCALE_SERVER_URL%%://*}"
+  [[ "$scheme" == "https" ]] || return 0
+  host="$(url_host "$HEADSCALE_SERVER_URL")"
+  [[ -n "$host" ]] || return 0
+  command_exists openssl || return 0
+
+  cert_subject="$(
+    printf '\n' |
+      openssl s_client -connect "${host}:443" -servername "$host" -showcerts 2>/dev/null |
+      openssl x509 -noout -subject 2>/dev/null || true
+  )"
+
+  if grep -q 'TRAEFIK DEFAULT CERT' <<<"$cert_subject"; then
+    die "Headscale 入口当前返回 TRAEFIK DEFAULT CERT，请先重新执行 Headscale 主节点部署脚本修正 HTTPS 入口。"
+  fi
+}
+
+check_headscale_endpoint() {
+  local url
+  local out_file
+  local err_file
+  local err_text
+
+  [[ "$HEADSCALE_ENDPOINT_CHECK" == "1" ]] || return 0
+
+  url="$(headscale_key_url)"
+  out_file="$(mktemp_managed)"
+  err_file="$(mktemp_managed)"
+  check_headscale_certificate_name
+
+  if curl -fsSL \
+    --connect-timeout "$HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC" \
+    --max-time "$HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC" \
+    "$url" -o "$out_file" 2>"$err_file"; then
+    log "Headscale 入口检查通过：$url"
+    return 0
+  fi
+
+  if grep -q 'TRAEFIK DEFAULT CERT' "$err_file" 2>/dev/null; then
+    die "Headscale 入口返回 TRAEFIK DEFAULT CERT，请重新执行 Headscale 主节点部署脚本。"
+  fi
+
+  err_text="$(sed -n '1,3p' "$err_file" 2>/dev/null | tr '\n' ' ')"
+  die "Headscale 入口不可用：$url ${err_text}"
+}
+
+stop_stale_tailscale_up() {
+  local pids
+  local pid
+
+  pids="$(ps -eo pid=,args= 2>/dev/null | awk -v self="$$" '$0 ~ /[t]ailscale[[:space:]]+up/ && $1 != self { print $1 }' || true)"
+  [[ -n "$pids" ]] || return 0
+
+  warn "检测到未结束的 tailscale up，正在停止后重试。"
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 2
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
 run_tailscale_up() {
-  local args=(up --login-server "$HEADSCALE_SERVER_URL" "--accept-dns=${HEADSCALE_ACCEPT_DNS}")
+  local args=(up --login-server "$HEADSCALE_SERVER_URL" "--accept-dns=${HEADSCALE_ACCEPT_DNS}" "--timeout=${HEADSCALE_CLIENT_UP_TIMEOUT_SEC}s")
   local extra
+  local exit_code=0
 
   if [[ "$HEADSCALE_RESET" != "1" ]] && tailnet_already_up; then
     log "当前节点已接入 Headscale 网络。"
@@ -191,8 +272,29 @@ run_tailscale_up() {
     fi
   done < <(split_words "$HEADSCALE_EXTRA_UP_ARGS")
 
+  stop_stale_tailscale_up
+  check_headscale_endpoint
   log "执行 tailscale up。"
-  tailscale "${args[@]}"
+  timeout "$HEADSCALE_CLIENT_UP_TIMEOUT_SEC" tailscale "${args[@]}" || exit_code=$?
+  if [[ "$exit_code" == "124" || "$exit_code" == "143" ]]; then
+    die "tailscale up 超时；请检查 HEADSCALE_AUTHKEY 是否过期、已使用，或 Headscale 入口是否可达。"
+  fi
+  [[ "$exit_code" == "0" ]] || exit "$exit_code"
+}
+
+verify_tailnet_ready() {
+  local ip4
+
+  tailscale status --self >/dev/null 2>&1 || die "tailscale 状态未就绪。"
+  ip4="$(tailscale_ipv4 || true)"
+  [[ -n "$ip4" ]] || die "未获取到 Headscale IPv4 地址。"
+  ip link show "$HOLLOW_NET_IFACE" >/dev/null 2>&1 || die "未找到网卡 $HOLLOW_NET_IFACE。"
+}
+
+verify_reboot_persistence() {
+  systemctl is-enabled --quiet tailscaled || die "tailscaled.service 未设置开机自启，主机重启后不会自动接入。"
+  systemctl is-active --quiet tailscaled || die "tailscaled.service 未运行。"
+  [[ -s /var/lib/tailscale/tailscaled.state ]] || die "缺少 /var/lib/tailscale/tailscaled.state，主机重启后无法保持登录状态。"
 }
 
 persist_tailnet_state() {
@@ -242,6 +344,8 @@ main() {
   configure_tailscaled_interface
   start_tailscaled
   run_tailscale_up
+  verify_tailnet_ready
+  verify_reboot_persistence
   configure_hollow_net_ufw
   persist_tailnet_state
   print_summary

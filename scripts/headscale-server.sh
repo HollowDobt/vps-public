@@ -37,6 +37,11 @@ HEADSCALE_ENABLE_CADDY="${HEADSCALE_ENABLE_CADDY:-auto}"
 HEADSCALE_CADDYFILE="${HEADSCALE_CADDYFILE:-/etc/caddy/Caddyfile}"
 HEADSCALE_CADDY_EMAIL="${HEADSCALE_CADDY_EMAIL:-}"
 HEADSCALE_CADDY_UFW_ALLOW="${HEADSCALE_CADDY_UFW_ALLOW:-1}"
+HEADSCALE_CADDY_VERIFY="${HEADSCALE_CADDY_VERIFY:-1}"
+HEADSCALE_CADDY_VERIFY_TIMEOUT_SEC="${HEADSCALE_CADDY_VERIFY_TIMEOUT_SEC:-120}"
+HEADSCALE_CADDY_REPAIR_CERT_CACHE="${HEADSCALE_CADDY_REPAIR_CERT_CACHE:-1}"
+HEADSCALE_EXCLUSIVE_PUBLIC_PORTS="${HEADSCALE_EXCLUSIVE_PUBLIC_PORTS:-1}"
+HEADSCALE_DISABLE_K3S_CONFLICTS="${HEADSCALE_DISABLE_K3S_CONFLICTS:-1}"
 CLOUDFLARE_HEADSCALE_DNS="${CLOUDFLARE_HEADSCALE_DNS:-1}"
 CLOUDFLARE_DNS_TARGET_IPV4="${CLOUDFLARE_DNS_TARGET_IPV4:-auto}"
 CLOUDFLARE_DNS_PROXIED="${CLOUDFLARE_DNS_PROXIED:-0}"
@@ -59,6 +64,8 @@ usage() {
   HEADSCALE_DNS_BASE_DOMAIN=auto
   HEADSCALE_USER=hollow
   HEADSCALE_ENABLE_CADDY=auto
+  HEADSCALE_CADDY_VERIFY=1
+  HEADSCALE_EXCLUSIVE_PUBLIC_PORTS=1
   HEADSCALE_CREATE_PREAUTHKEY=0
   BACKUP_ENABLE=1
   BACKUP_GPG_EMAILS=you@example.com
@@ -148,8 +155,13 @@ validate_input() {
   validate_bool HEADSCALE_UFW_ALLOW "$HEADSCALE_UFW_ALLOW"
   validate_bool HEADSCALE_ENABLE_CADDY "$HEADSCALE_ENABLE_CADDY"
   validate_bool HEADSCALE_CADDY_UFW_ALLOW "$HEADSCALE_CADDY_UFW_ALLOW"
+  validate_bool HEADSCALE_CADDY_VERIFY "$HEADSCALE_CADDY_VERIFY"
+  validate_bool HEADSCALE_CADDY_REPAIR_CERT_CACHE "$HEADSCALE_CADDY_REPAIR_CERT_CACHE"
+  validate_bool HEADSCALE_EXCLUSIVE_PUBLIC_PORTS "$HEADSCALE_EXCLUSIVE_PUBLIC_PORTS"
+  validate_bool HEADSCALE_DISABLE_K3S_CONFLICTS "$HEADSCALE_DISABLE_K3S_CONFLICTS"
   validate_bool CLOUDFLARE_HEADSCALE_DNS "$CLOUDFLARE_HEADSCALE_DNS"
   validate_bool CLOUDFLARE_DNS_PROXIED "$CLOUDFLARE_DNS_PROXIED"
+  [[ "$HEADSCALE_CADDY_VERIFY_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die "HEADSCALE_CADDY_VERIFY_TIMEOUT_SEC 必须是数字。"
   if [[ "$CLOUDFLARE_HEADSCALE_DNS" == "1" && "$CLOUDFLARE_DNS_PROXIED" == "1" ]]; then
     die "Headscale DNS 记录不能开启 Cloudflare 代理，请设置 CLOUDFLARE_DNS_PROXIED=0。"
   fi
@@ -323,12 +335,44 @@ configure_headscale() {
   set_yaml_key "$HEADSCALE_CONFIG" listen_addr "$quoted_listen"
   set_yaml_key "$HEADSCALE_CONFIG" metrics_listen_addr "$quoted_metrics"
   set_yaml_key "$HEADSCALE_CONFIG" grpc_listen_addr "$quoted_grpc"
+  if [[ "$HEADSCALE_ENABLE_CADDY" == "1" ]]; then
+    set_yaml_key "$HEADSCALE_CONFIG" tls_cert_path '""'
+    set_yaml_key "$HEADSCALE_CONFIG" tls_key_path '""'
+  fi
   set_dns_base_domain "$HEADSCALE_CONFIG" "$HEADSCALE_DNS_BASE_DOMAIN"
   append_config_fragment
 
   headscale configtest
-  systemctl enable --now headscale
+  systemctl enable headscale
+  systemctl restart headscale
   log "Headscale 服务已启动。"
+}
+
+public_port_conflict_detected() {
+  command_exists iptables || return 1
+  iptables -t nat -S 2>/dev/null |
+    grep -Eq 'CNI-HOSTPORT-DNAT|kube-system/traefik|--dports 80,443|tcp --dport (80|443).*KUBE'
+}
+
+clear_k3s_public_port_conflicts() {
+  [[ "$HEADSCALE_ENABLE_CADDY" == "1" ]] || return 0
+  [[ "$HEADSCALE_EXCLUSIVE_PUBLIC_PORTS" == "1" ]] || return 0
+  public_port_conflict_detected || return 0
+
+  if [[ "$HEADSCALE_DISABLE_K3S_CONFLICTS" != "1" ]]; then
+    die "检测到 k3s/CNI 正在接管 80/443；Headscale HTTPS 入口需要独占公网 80/443。"
+  fi
+
+  warn "检测到 k3s/CNI 接管 80/443，正在按 Headscale 主节点角色关闭 k3s/k3s-agent。"
+  systemctl disable --now k3s >/dev/null 2>&1 || true
+  systemctl disable --now k3s-agent >/dev/null 2>&1 || true
+  if [[ -x /usr/local/bin/k3s-killall.sh ]]; then
+    /usr/local/bin/k3s-killall.sh >/dev/null 2>&1 || true
+  fi
+
+  sleep 2
+  public_port_conflict_detected && die "k3s/CNI 仍在接管 80/443，请检查残留的 k3s 服务或容器。"
+  log "Headscale 公网入口冲突已清理。"
 }
 
 install_caddy_package() {
@@ -403,9 +447,108 @@ configure_caddy_if_needed() {
 
   atomic_install_file "$temp_file" "$HEADSCALE_CADDYFILE" 0644 root root
   caddy validate --config "$HEADSCALE_CADDYFILE"
-  systemctl enable --now caddy
+  systemctl enable caddy
+  systemctl start caddy
   systemctl reload caddy || systemctl restart caddy
+  verify_caddy_headscale_endpoint "$host"
   log "Caddy 反向代理已配置：${host} -> ${upstream}"
+}
+
+caddy_served_cert_text() {
+  local host="$1"
+
+  command_exists openssl || return 1
+  printf '\n' |
+    openssl s_client -connect 127.0.0.1:443 -servername "$host" -showcerts 2>/dev/null |
+    openssl x509 -noout -subject -issuer -ext subjectAltName 2>/dev/null || return 1
+}
+
+caddy_key_endpoint_ready() {
+  local host="$1"
+  local deadline
+  local cert_text
+  local out_file
+  local err_file
+
+  out_file="$(mktemp_managed)"
+  err_file="$(mktemp_managed)"
+  deadline=$((SECONDS + HEADSCALE_CADDY_VERIFY_TIMEOUT_SEC))
+
+  while (( SECONDS <= deadline )); do
+    cert_text="$(caddy_served_cert_text "$host" || true)"
+    if grep -q 'TRAEFIK DEFAULT CERT' <<<"$cert_text"; then
+      return 2
+    fi
+
+    if curl -fsS \
+      --resolve "${host}:443:127.0.0.1" \
+      --connect-timeout 5 \
+      --max-time 10 \
+      "https://${host}/key?v=133" \
+      -o "$out_file" 2>"$err_file"; then
+      return 0
+    fi
+
+    sleep 2
+  done
+
+  return 1
+}
+
+repair_caddy_domain_cert_cache() {
+  local host="$1"
+  local cert_root="/var/lib/caddy/.local/share/caddy/certificates"
+  local backup_dir
+  local found=0
+  local path
+  local issuer
+
+  [[ "$HEADSCALE_CADDY_REPAIR_CERT_CACHE" == "1" ]] || return 1
+  [[ -d "$cert_root" ]] || return 0
+
+  backup_dir="${STATE_DIR}/caddy-cert-backups/${host}-$(date -u +%Y%m%dT%H%M%SZ)"
+  install -d -o root -g root -m 0700 "$backup_dir"
+
+  while IFS= read -r path; do
+    [[ -d "$path" ]] || continue
+    issuer="$(basename "$(dirname "$path")")"
+    mv -- "$path" "${backup_dir}/${issuer}"
+    found=1
+  done < <(find "$cert_root" -mindepth 2 -maxdepth 2 -type d -name "$host" 2>/dev/null)
+
+  if [[ "$found" == "1" ]]; then
+    log "已隔离 ${host} 的 Caddy 证书缓存：${backup_dir}"
+  fi
+  return 0
+}
+
+verify_caddy_headscale_endpoint() {
+  local host="$1"
+
+  [[ "$HEADSCALE_CADDY_VERIFY" == "1" ]] || return 0
+
+  log "检查 Headscale HTTPS 入口：${host}"
+  if caddy_key_endpoint_ready "$host"; then
+    log "Headscale HTTPS 入口检查通过：https://${host}/key"
+    return 0
+  fi
+
+  warn "Headscale HTTPS 入口首次检查失败，重启 Caddy 后复查。"
+  systemctl restart caddy
+  if caddy_key_endpoint_ready "$host"; then
+    log "Headscale HTTPS 入口检查通过：https://${host}/key"
+    return 0
+  fi
+
+  warn "Headscale HTTPS 入口仍未通过，隔离本域名证书缓存后复查。"
+  repair_caddy_domain_cert_cache "$host"
+  systemctl restart caddy
+  if caddy_key_endpoint_ready "$host"; then
+    log "Headscale HTTPS 入口检查通过：https://${host}/key"
+    return 0
+  fi
+
+  die "Headscale HTTPS 入口检查失败：请检查 DNS 是否指向本机、80/443 是否可达、Caddy 是否占用正确端口。"
 }
 
 ensure_headscale_user() {
@@ -500,6 +643,16 @@ configure_cloudflare_dns_if_needed() {
   cloudflare_upsert_record "$host" A "$target" "$CLOUDFLARE_DNS_PROXIED" "$CLOUDFLARE_DNS_TTL"
 }
 
+verify_headscale_boot_persistence() {
+  systemctl is-enabled --quiet headscale || die "headscale.service 未设置开机自启，主机重启后不会自动恢复。"
+  systemctl is-active --quiet headscale || die "headscale.service 未运行。"
+
+  if [[ "$HEADSCALE_ENABLE_CADDY" == "1" ]]; then
+    systemctl is-enabled --quiet caddy || die "caddy.service 未设置开机自启，主机重启后 HTTPS 入口不会自动恢复。"
+    systemctl is-active --quiet caddy || die "caddy.service 未运行。"
+  fi
+}
+
 print_summary() {
   printf '\nHeadscale 部署完成。\n'
   printf '  server_url：%s\n' "$HEADSCALE_SERVER_URL"
@@ -536,7 +689,9 @@ main() {
   configure_cloudflare_dns_if_needed
   configure_headscale
   configure_ufw
+  clear_k3s_public_port_conflicts
   configure_caddy_if_needed
+  verify_headscale_boot_persistence
   ensure_headscale_user
   create_preauth_key_if_needed
   install_backup_timer headscale
