@@ -667,6 +667,7 @@ cleanup_split_rules() {
     iptables -t nat -X HLWDOT_SPLIT_POSTROUTING 2>/dev/null || true
   fi
   [ "$removed" = 1 ] && log "已清理旧的 Headscale 网络分流规则。"
+  return 0
 }
 
 split_rules_enabled() {
