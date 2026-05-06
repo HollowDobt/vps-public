@@ -439,7 +439,9 @@ create_preauth_key_if_needed() {
   else
     args=(preauthkeys create --expiration "$HEADSCALE_PREAUTH_EXPIRATION")
   fi
-  [[ "$HEADSCALE_PREAUTH_REUSABLE" == "1" ]] && args+=(--reusable)
+  if [[ "$HEADSCALE_PREAUTH_REUSABLE" == "1" ]]; then
+    args+=(--reusable)
+  fi
 
   log "创建 Headscale preauth key。"
   if command_exists jq && output="$(headscale "${args[@]}" -o json 2>/dev/null)"; then
@@ -454,7 +456,12 @@ create_preauth_key_if_needed() {
   output="$(headscale "${args[@]}")"
   printf '%s\n' "$output"
   key="$(grep -Eo '(hskey-auth|tskey-auth|tskey)-[A-Za-z0-9._=-]+' <<<"$output" | head -n 1 || true)"
-  [[ -n "$key" ]] && persist_env_value HEADSCALE_AUTHKEY "$key"
+  if [[ -n "$key" ]]; then
+    persist_env_value HEADSCALE_AUTHKEY "$key"
+  else
+    warn "未能从输出中解析认证密钥，请手工复制上方输出。"
+  fi
+  return 0
 }
 
 configure_ufw() {

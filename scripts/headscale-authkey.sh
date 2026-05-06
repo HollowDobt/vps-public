@@ -72,7 +72,9 @@ create_key() {
   else
     args=(preauthkeys create --expiration "$HEADSCALE_PREAUTH_EXPIRATION")
   fi
-  [[ "$HEADSCALE_PREAUTH_REUSABLE" == "1" ]] && args+=(--reusable)
+  if [[ "$HEADSCALE_PREAUTH_REUSABLE" == "1" ]]; then
+    args+=(--reusable)
+  fi
 
   printf '\n新认证密钥：\n'
   if command_exists jq && output="$(headscale "${args[@]}" -o json 2>/dev/null)"; then

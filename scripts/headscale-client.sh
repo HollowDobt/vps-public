@@ -163,15 +163,29 @@ run_tailscale_up() {
     return 0
   fi
 
-  [[ -n "$HEADSCALE_AUTHKEY" ]] && args+=(--auth-key "$HEADSCALE_AUTHKEY")
-  [[ -n "$HEADSCALE_CLIENT_HOSTNAME" ]] && args+=(--hostname "$HEADSCALE_CLIENT_HOSTNAME")
-  [[ -n "$HEADSCALE_ADVERTISE_ROUTES" ]] && args+=(--advertise-routes "$HEADSCALE_ADVERTISE_ROUTES")
-  [[ "$HEADSCALE_ADVERTISE_EXIT_NODE" == "1" ]] && args+=(--advertise-exit-node)
-  [[ "$HEADSCALE_ENABLE_TS_SSH" == "1" ]] && args+=(--ssh)
-  [[ "$HEADSCALE_RESET" == "1" ]] && args+=(--reset)
+  if [[ -n "$HEADSCALE_AUTHKEY" ]]; then
+    args+=(--auth-key "$HEADSCALE_AUTHKEY")
+  fi
+  if [[ -n "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
+    args+=(--hostname "$HEADSCALE_CLIENT_HOSTNAME")
+  fi
+  if [[ -n "$HEADSCALE_ADVERTISE_ROUTES" ]]; then
+    args+=(--advertise-routes "$HEADSCALE_ADVERTISE_ROUTES")
+  fi
+  if [[ "$HEADSCALE_ADVERTISE_EXIT_NODE" == "1" ]]; then
+    args+=(--advertise-exit-node)
+  fi
+  if [[ "$HEADSCALE_ENABLE_TS_SSH" == "1" ]]; then
+    args+=(--ssh)
+  fi
+  if [[ "$HEADSCALE_RESET" == "1" ]]; then
+    args+=(--reset)
+  fi
 
   while IFS= read -r extra; do
-    [[ -n "$extra" ]] && args+=("$extra")
+    if [[ -n "$extra" ]]; then
+      args+=("$extra")
+    fi
   done < <(split_words "$HEADSCALE_EXTRA_UP_ARGS")
 
   log "执行 tailscale up。"

@@ -83,7 +83,10 @@ persist_k3s_agent_config() {
   persist_env_value K3S_NODE_IP "$K3S_NODE_IP"
   persist_env_value K3S_FLANNEL_IFACE "$K3S_FLANNEL_IFACE"
   persist_env_value HOLLOW_NET_IFACE "$HOLLOW_NET_IFACE"
-  [[ -n "$K3S_AGENT_TOKEN" ]] && persist_env_value K3S_AGENT_TOKEN "$K3S_AGENT_TOKEN"
+  if [[ -n "$K3S_AGENT_TOKEN" ]]; then
+    persist_env_value K3S_AGENT_TOKEN "$K3S_AGENT_TOKEN"
+  fi
+  return 0
 }
 
 write_k3s_config() {
@@ -127,9 +130,13 @@ install_k3s_agent() {
   install_script="$(mktemp_managed)"
   download_file https://get.k3s.io "$install_script"
 
-  [[ -n "$K3S_AGENT_EXTRA_ARGS" ]] && exec_cmd+=" ${K3S_AGENT_EXTRA_ARGS}"
+  if [[ -n "$K3S_AGENT_EXTRA_ARGS" ]]; then
+    exec_cmd+=" ${K3S_AGENT_EXTRA_ARGS}"
+  fi
   env_args+=(INSTALL_K3S_EXEC="$exec_cmd")
-  [[ -n "$K3S_VERSION" ]] && env_args+=(INSTALL_K3S_VERSION="$K3S_VERSION")
+  if [[ -n "$K3S_VERSION" ]]; then
+    env_args+=(INSTALL_K3S_VERSION="$K3S_VERSION")
+  fi
 
   log "安装 k3s agent。"
   env "${env_args[@]}" sh "$install_script"

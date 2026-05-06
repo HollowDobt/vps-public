@@ -167,7 +167,10 @@ persist_flux_config() {
   persist_env_value FLUX_CLUSTER_NAME "$FLUX_CLUSTER_NAME"
   persist_env_value FLUX_GITHUB_PATH "$FLUX_GITHUB_PATH"
   persist_env_value FLUX_AGE_KEY_FILE "$FLUX_AGE_KEY_FILE"
-  [[ -n "$FLUX_AGE_PUBLIC_KEY" ]] && persist_env_value FLUX_AGE_PUBLIC_KEY "$FLUX_AGE_PUBLIC_KEY"
+  if [[ -n "$FLUX_AGE_PUBLIC_KEY" ]]; then
+    persist_env_value FLUX_AGE_PUBLIC_KEY "$FLUX_AGE_PUBLIC_KEY"
+  fi
+  return 0
 }
 
 ensure_sops_secret() {
@@ -191,9 +194,17 @@ flux_bootstrap() {
     --branch "$FLUX_GITHUB_BRANCH"
     --path "$FLUX_GITHUB_PATH")
 
-  [[ "$FLUX_GITHUB_PRIVATE" == "1" ]] && args+=(--private=true) || args+=(--private=false)
-  [[ "$FLUX_GITHUB_PERSONAL" == "1" ]] && args+=(--personal)
-  [[ -n "$FLUX_COMPONENTS_EXTRA" ]] && args+=(--components-extra "$FLUX_COMPONENTS_EXTRA")
+  if [[ "$FLUX_GITHUB_PRIVATE" == "1" ]]; then
+    args+=(--private=true)
+  else
+    args+=(--private=false)
+  fi
+  if [[ "$FLUX_GITHUB_PERSONAL" == "1" ]]; then
+    args+=(--personal)
+  fi
+  if [[ -n "$FLUX_COMPONENTS_EXTRA" ]]; then
+    args+=(--components-extra "$FLUX_COMPONENTS_EXTRA")
+  fi
 
   log "执行 Flux GitHub bootstrap。"
   GITHUB_TOKEN="$GITHUB_TOKEN" flux "${args[@]}"

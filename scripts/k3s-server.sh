@@ -156,7 +156,10 @@ persist_k3s_server_config() {
   persist_env_value K3S_UFW_INTERFACE "$K3S_UFW_INTERFACE"
   persist_env_value K3S_API_PORT "$K3S_API_PORT"
   persist_env_value K3S_SERVER_URL "$K3S_SERVER_URL"
-  [[ -n "$K3S_SERVER_HOSTNAME" ]] && persist_env_value K3S_SERVER_HOSTNAME "$K3S_SERVER_HOSTNAME"
+  if [[ -n "$K3S_SERVER_HOSTNAME" ]]; then
+    persist_env_value K3S_SERVER_HOSTNAME "$K3S_SERVER_HOSTNAME"
+  fi
+  return 0
 }
 
 write_k3s_config() {
@@ -178,7 +181,9 @@ write_k3s_config() {
     yaml_quote "$K3S_SERVICE_CIDR"
     printf '\n'
 
-    [[ "$K3S_CLUSTER_INIT" == "1" ]] && printf 'cluster-init: true\n'
+    if [[ "$K3S_CLUSTER_INIT" == "1" ]]; then
+      printf 'cluster-init: true\n'
+    fi
     if [[ -n "$K3S_NODE_NAME" ]]; then
       printf 'node-name: '
       yaml_quote "$K3S_NODE_NAME"
@@ -212,7 +217,9 @@ write_k3s_config() {
       yaml_quote "$K3S_ETCD_SNAPSHOT_SCHEDULE"
       printf '\n'
       printf 'etcd-snapshot-retention: %s\n' "$K3S_ETCD_SNAPSHOT_RETENTION"
-      [[ "$K3S_ETCD_SNAPSHOT_COMPRESS" == "1" ]] && printf 'etcd-snapshot-compress: true\n'
+      if [[ "$K3S_ETCD_SNAPSHOT_COMPRESS" == "1" ]]; then
+        printf 'etcd-snapshot-compress: true\n'
+      fi
     fi
   } >"$temp_config"
 
@@ -228,9 +235,13 @@ install_k3s() {
   install_script="$(mktemp_managed)"
   download_file https://get.k3s.io "$install_script"
 
-  [[ -n "$K3S_SERVER_EXTRA_ARGS" ]] && exec_cmd+=" ${K3S_SERVER_EXTRA_ARGS}"
+  if [[ -n "$K3S_SERVER_EXTRA_ARGS" ]]; then
+    exec_cmd+=" ${K3S_SERVER_EXTRA_ARGS}"
+  fi
   env_args+=(INSTALL_K3S_EXEC="$exec_cmd")
-  [[ -n "$K3S_VERSION" ]] && env_args+=(INSTALL_K3S_VERSION="$K3S_VERSION")
+  if [[ -n "$K3S_VERSION" ]]; then
+    env_args+=(INSTALL_K3S_VERSION="$K3S_VERSION")
+  fi
 
   log "安装 k3s server。"
   env "${env_args[@]}" sh "$install_script"
