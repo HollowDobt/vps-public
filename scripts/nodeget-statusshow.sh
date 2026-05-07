@@ -1369,7 +1369,8 @@ EOF
 #!/bin/sh
 set -eu
 . ${conf_file}
-exec /usr/local/bin/cloudflared tunnel --no-autoupdate run --token "\$TUNNEL_TOKEN"
+export TUNNEL_TOKEN
+exec /usr/local/bin/cloudflared tunnel --no-autoupdate run
 EOF
   chmod 0750 "$CLOUDFLARED_RUN_SCRIPT"
   chown root:root "$CLOUDFLARED_RUN_SCRIPT"
@@ -1555,22 +1556,45 @@ cloudflare_upsert_dns_record() {
   fi
 }
 
+stop_openrc_service() {
+  rc-service "$1" stop >/dev/null 2>&1 || true
+}
+
 start_services() {
   rc-update add "$NODEGET_SERVER_SERVICE" default >/dev/null
   if [ "$NODEGET_AGENT_INGRESS_ENABLE" = 1 ] || [ "$NODEGET_AGENT_INGRESS_ENABLE" = true ]; then
     rc-update add "$NODEGET_TAILNET_INGRESS_SERVICE" default >/dev/null
+  else
+    stop_openrc_service "$NODEGET_TAILNET_INGRESS_SERVICE"
+    rc-update del "$NODEGET_TAILNET_INGRESS_SERVICE" default >/dev/null 2>&1 || true
   fi
   rc-update add "$NODEGET_HOLLOW_SYNC_SERVICE" default >/dev/null
   rc-update add "$NODEGET_STATUS_CADDY_SERVICE" default >/dev/null
-  rc-service "$NODEGET_SERVER_SERVICE" restart
-  if [ "$NODEGET_AGENT_INGRESS_ENABLE" = 1 ] || [ "$NODEGET_AGENT_INGRESS_ENABLE" = true ]; then
-    rc-service "$NODEGET_TAILNET_INGRESS_SERVICE" restart
-  fi
-  rc-service "$NODEGET_HOLLOW_SYNC_SERVICE" restart
-  rc-service "$NODEGET_STATUS_CADDY_SERVICE" restart
   if [ "$NODEGET_CLOUDFLARED_ENABLE" = 1 ] || [ "$NODEGET_CLOUDFLARED_ENABLE" = true ]; then
     rc-update add "$NODEGET_CLOUDFLARED_SERVICE" default >/dev/null
-    rc-service "$NODEGET_CLOUDFLARED_SERVICE" restart
+  else
+    stop_openrc_service "$NODEGET_CLOUDFLARED_SERVICE"
+    rc-update del "$NODEGET_CLOUDFLARED_SERVICE" default >/dev/null 2>&1 || true
+  fi
+
+  if [ "$NODEGET_CLOUDFLARED_ENABLE" = 1 ] || [ "$NODEGET_CLOUDFLARED_ENABLE" = true ]; then
+    stop_openrc_service "$NODEGET_CLOUDFLARED_SERVICE"
+  fi
+  stop_openrc_service "$NODEGET_STATUS_CADDY_SERVICE"
+  if [ "$NODEGET_AGENT_INGRESS_ENABLE" = 1 ] || [ "$NODEGET_AGENT_INGRESS_ENABLE" = true ]; then
+    stop_openrc_service "$NODEGET_TAILNET_INGRESS_SERVICE"
+  fi
+  stop_openrc_service "$NODEGET_HOLLOW_SYNC_SERVICE"
+  stop_openrc_service "$NODEGET_SERVER_SERVICE"
+
+  rc-service "$NODEGET_SERVER_SERVICE" start
+  if [ "$NODEGET_AGENT_INGRESS_ENABLE" = 1 ] || [ "$NODEGET_AGENT_INGRESS_ENABLE" = true ]; then
+    rc-service "$NODEGET_TAILNET_INGRESS_SERVICE" start
+  fi
+  rc-service "$NODEGET_HOLLOW_SYNC_SERVICE" start
+  rc-service "$NODEGET_STATUS_CADDY_SERVICE" start
+  if [ "$NODEGET_CLOUDFLARED_ENABLE" = 1 ] || [ "$NODEGET_CLOUDFLARED_ENABLE" = true ]; then
+    rc-service "$NODEGET_CLOUDFLARED_SERVICE" start
   fi
 }
 
