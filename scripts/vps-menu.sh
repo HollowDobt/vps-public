@@ -17,7 +17,7 @@ MENU_LABELS=(
   "部署 Headscale 主节点"
   "签发 Headscale 接入密钥"
   "接入 Headscale 网络"
-  "Alpine 小鸡接入 Headscale 网络"
+  "Alpine 节点接入 Headscale 网络"
   "部署 k3s 主节点"
   "全流程：作为子节点并入网络"
   "部署 k3s 子节点"
@@ -61,7 +61,7 @@ MENU_HINTS=(
   "输出 worker 接入 token"
   "加密并上传 Headscale 状态"
   "加密并上传 k3s/Flux 状态"
-  "Alpine NAT LXC：NodeGet Server + 魔改 StatusShow + Cloudflare Tunnel"
+  "Alpine NAT LXC：NodeGet Server + StatusShow + Cloudflare Tunnel"
   "返回 shell"
 )
 MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "f" "0")

@@ -67,16 +67,15 @@ usage() {
   NODEGET_STATUS_HOSTNAME=nodeget.example.com
   NODEGET_CLOUDFLARED_TOKEN=Cloudflare Tunnel token
 
-最终公开数据读取需要：
-  NODEGET_VISITOR_TOKEN=只读 Visitor Token
+公开页读取 NodeGet 后端需要：
+  NODEGET_VISITOR_TOKEN=key:secret 或 username|password
 
 说明：
   - 仅支持 Alpine Linux + OpenRC。
   - 只读检查当前节点已在 hollow-net，不执行 Headscale 接入。
   - NodeGet Server 与 Caddy 都只监听 127.0.0.1。
   - Agent 内网入口只绑定 hollow-net IPv4，不监听公网。
-  - Cloudflare 使用 Tunnel token 运行隧道；可用最小权限 API token
-    幂等配置 healthy-page public hostname 和 proxied CNAME。
+  - Cloudflare Tunnel 负责公网访问；DNS/API 配置为可选项。
 EOF
 }
 
@@ -180,6 +179,14 @@ validate_bool() {
   esac
 }
 
+token_format_valid() {
+  case "$1" in
+    ?*:?*) return 0 ;;
+    ?*'|'?*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 setup_state_dir() {
   mkdir -p /etc/hlwdot /opt/hlwdot /var/lib/hlwdot
   mkdir -p "$TMP_DIR" "$APP_ROOT" "$CONFIG_DIR" /usr/local/lib/hlwdot
@@ -211,8 +218,7 @@ cleanup_self_test_root() {
 merge_nodeget_env_files() {
   old_env="$1"
   example_env="$2"
-  li_env="$3"
-  account_id="${4:-}"
+  account_id="${3:-}"
   dir=$(CDPATH= cd -- "$(dirname -- "$old_env")" && pwd)
   base=$(basename "$old_env")
   tmp="${dir}/${base}.merge.$$"
@@ -230,10 +236,8 @@ merge_nodeget_env_files() {
 
   [ -f "$old_env" ] || die "找不到旧 .env：$old_env"
   [ -f "$example_env" ] || die "找不到 .env.example：$example_env"
-  [ -f "$li_env" ] || die "找不到 .env-li：$li_env"
 
   cp -p "$old_env" "$backup"
-  chmod 0600 "$li_env"
   awk '
     /^# NodeGet hollow-net 探针页。/ { keep = 1 }
     keep {
@@ -246,7 +250,7 @@ merge_nodeget_env_files() {
     die ".env.example 缺少 NodeGet 配置段。"
   }
 
-  awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ && $1 ~ /^NODEGET_/ { print }' "$li_env" >"$overrides"
+  awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ && $1 ~ /^NODEGET_/ { print }' "$old_env" >"$overrides"
   grep -q '^NODEGET_TUNNEL_NAME=' "$overrides" || printf 'NODEGET_TUNNEL_NAME=healthy-page\n' >>"$overrides"
   if [ -n "$account_id" ] && ! grep -q '^NODEGET_CLOUDFLARE_ACCOUNT_ID=' "$overrides"; then
     printf 'NODEGET_CLOUDFLARE_ACCOUNT_ID=%s\n' "$account_id" >>"$overrides"
@@ -315,7 +319,11 @@ merge_nodeget_env_files() {
       1|true) : "${NODEGET_DNS_CONFIG_TOKEN:?}" ;;
       auto) [ -z "${NODEGET_DNS_CONFIG_TOKEN:-}" ] || : "${NODEGET_DNS_CONFIG_TOKEN:?}" ;;
     esac
-    [ "${NODEGET_VISITOR_TOKEN:-}" != "YOUR_TOKEN_HERE" ]
+    case "${NODEGET_VISITOR_TOKEN:-}" in
+      ""|YOUR_TOKEN_HERE) ;;
+      ?*:?*|?*\|?*) ;;
+      *) exit 14 ;;
+    esac
     case "${NODEGET_SERVER_LISTEN:-127.0.0.1:2211}" in
       127.0.0.1:*|localhost:*) ;;
       *) exit 11 ;;
@@ -340,8 +348,8 @@ merge_env() {
   NODEGET_DEFAULT_ZONE_ID="${NODEGET_DEFAULT_ZONE_ID:-8e60f95b7b37991976bb8db6df4ea2de}"
   export NODEGET_DEFAULT_TUNNEL_ID
   export NODEGET_DEFAULT_ZONE_ID
-  merge_nodeget_env_files "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.example" "${SCRIPT_DIR}/.env-li" "$account_id"
-  log ".env 已合并 NodeGet 配置；.env-li 权限已收紧。"
+  merge_nodeget_env_files "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.example" "$account_id"
+  log ".env 已更新。"
 }
 
 on_exit() {
@@ -460,9 +468,12 @@ validate_input() {
     ''|*/*|*:*|*[!A-Za-z0-9_.-]*|.*|*.) die "NODEGET_STATUS_HOSTNAME 格式错误。" ;;
   esac
   if [ -z "$NODEGET_VISITOR_TOKEN" ]; then
-    warn "NODEGET_VISITOR_TOKEN 为空；首跑会先初始化主控和隧道，创建 Visitor token 后重跑即可启用公开数据读取。"
+    warn "NODEGET_VISITOR_TOKEN 为空；公开页不会连接 NodeGet 后端。"
   fi
   [ "$NODEGET_VISITOR_TOKEN" != "YOUR_TOKEN_HERE" ] || die "NODEGET_VISITOR_TOKEN 仍是占位符。"
+  if [ -n "$NODEGET_VISITOR_TOKEN" ] && ! token_format_valid "$NODEGET_VISITOR_TOKEN"; then
+    die "NODEGET_VISITOR_TOKEN 必须是 key:secret 或 username|password。"
+  fi
   case "$NODEGET_SERVER_LISTEN" in
     127.0.0.1:*|localhost:*) ;;
     *) die "NODEGET_SERVER_LISTEN 必须绑定 127.0.0.1，不能监听公网。" ;;
@@ -505,10 +516,10 @@ validate_input() {
   esac
   [ "$NODEGET_HOLLOW_SYNC_INTERVAL_SEC" -ge 10 ] || die "NODEGET_HOLLOW_SYNC_INTERVAL_SEC 不能低于 10 秒。"
   if [ "$NODEGET_CLOUDFLARED_ENABLE" = 1 ] || [ "$NODEGET_CLOUDFLARED_ENABLE" = true ]; then
-    [ -n "$NODEGET_CLOUDFLARED_TOKEN" ] || die "请填写 NODEGET_CLOUDFLARED_TOKEN。"
+    [ -n "$NODEGET_CLOUDFLARED_TOKEN" ] || die "缺少 NODEGET_CLOUDFLARED_TOKEN。"
   fi
   if tunnel_config_enabled; then
-    [ -n "$NODEGET_DNS_CONFIG_TOKEN" ] || die "请填写 NODEGET_DNS_CONFIG_TOKEN。"
+    [ -n "$NODEGET_DNS_CONFIG_TOKEN" ] || die "缺少 NODEGET_DNS_CONFIG_TOKEN。"
     case "$NODEGET_TUNNEL_NAME" in
       ''|*/*|*[!A-Za-z0-9_.-]*) die "NODEGET_TUNNEL_NAME 格式错误。" ;;
     esac
@@ -1013,19 +1024,27 @@ import { mergeHollowNodes, useHollowNodes } from './hooks/useHollowNodes'|" "$ap
 write_statusshow_config_file() {
   config_output="$1"
   mkdir -p "$(dirname "$config_output")"
-  cat >"$config_output" <<EOF
-{
-  "site_name": $(json_string "$NODEGET_STATUS_SITE_NAME"),
-  "site_logo": $(json_string "$NODEGET_STATUS_LOGO"),
-  "footer": $(json_string "$NODEGET_STATUS_FOOTER"),
-  "hollow_net_inventory": true,
-  "site_tokens": [
+  if [ -n "$NODEGET_VISITOR_TOKEN" ]; then
+    site_tokens_json=$(cat <<EOF
+[
     {
       "name": $(json_string "$NODEGET_SERVER_NAME"),
       "backend_url": $(json_string "wss://${NODEGET_STATUS_HOSTNAME}/nodeget-ws"),
       "token": $(json_string "$NODEGET_VISITOR_TOKEN")
     }
   ]
+EOF
+)
+  else
+    site_tokens_json='[]'
+  fi
+  cat >"$config_output" <<EOF
+{
+  "site_name": $(json_string "$NODEGET_STATUS_SITE_NAME"),
+  "site_logo": $(json_string "$NODEGET_STATUS_LOGO"),
+  "footer": $(json_string "$NODEGET_STATUS_FOOTER"),
+  "hollow_net_inventory": true,
+  "site_tokens": ${site_tokens_json}
 }
 EOF
 }
@@ -1446,7 +1465,7 @@ cloudflare_account_id() {
   out="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-accounts.json"
   cloudflare_api GET '/accounts?per_page=2' "$out"
   count=$(jq '.result | length' "$out")
-  [ "$count" = 1 ] || die "无法唯一确定 Cloudflare account；请填写 NODEGET_CLOUDFLARE_ACCOUNT_ID。"
+  [ "$count" = 1 ] || die "无法唯一确定 Cloudflare account；设置 NODEGET_CLOUDFLARE_ACCOUNT_ID。"
   jq -r '.result[0].id' "$out"
 }
 
@@ -1458,11 +1477,11 @@ cloudflare_zone_id() {
 
   zone="$NODEGET_CLOUDFLARE_ZONE"
   [ -n "$zone" ] || zone=$(printf '%s\n' "$NODEGET_STATUS_HOSTNAME" | awk -F. 'NF >= 2 { print $(NF-1) "." $NF }')
-  [ -n "$zone" ] || die "无法确定 Cloudflare zone；请填写 NODEGET_CLOUDFLARE_ZONE_ID。"
+  [ -n "$zone" ] || die "无法确定 Cloudflare zone；设置 NODEGET_CLOUDFLARE_ZONE_ID。"
   out="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-zones.json"
   cloudflare_api GET "/zones?name=$(urlencode_component "$zone")&status=active&per_page=5" "$out"
   count=$(jq --arg zone "$zone" '[.result[] | select(.name == $zone)] | length' "$out")
-  [ "$count" = 1 ] || die "无法唯一确定 Cloudflare zone：$zone；请填写 NODEGET_CLOUDFLARE_ZONE_ID。"
+  [ "$count" = 1 ] || die "无法唯一确定 Cloudflare zone：$zone；设置 NODEGET_CLOUDFLARE_ZONE_ID。"
   jq -r --arg zone "$zone" '.result[] | select(.name == $zone) | .id' "$out"
 }
 
@@ -1753,7 +1772,7 @@ self_test_frontend_build() {
   NODEGET_STATUS_SITE_NAME="Self Test"
   NODEGET_STATUS_FOOTER="Self Test"
   NODEGET_STATUS_LOGO=""
-  NODEGET_VISITOR_TOKEN="self-test-token"
+  NODEGET_VISITOR_TOKEN="self-test-key:self-test-secret"
   NODEGET_SERVER_NAME="self-test"
 
   mkdir -p "$TMP_DIR" "$APP_ROOT" "$CONFIG_DIR"
@@ -1776,7 +1795,7 @@ self_test_frontend_build() {
   [ -s "${SRC_DIR}/dist/index.html" ] || die "自检构建失败：缺少 dist/index.html"
   grep -R "hollow-nodes.json" "${SRC_DIR}/dist" >/dev/null 2>&1 || die "自检构建失败：产物缺少 hollow-net inventory 逻辑"
   jq -e '.hollow_net_inventory == true and .site_tokens[0].backend_url == "wss://nodeget-selftest.example.com/nodeget-ws"' "${SRC_DIR}/public/config.json" >/dev/null
-  log "自检通过：魔改 StatusShow 可 typecheck/build。"
+  log "自检通过：StatusShow 构建。"
 }
 
 build_prebuilt_asset() {
@@ -1958,10 +1977,12 @@ EOF
 self_test_env_merge() {
   old_env="${TMP_DIR}/old.env"
   example_env="${TMP_DIR}/example.env"
-  li_env="${TMP_DIR}/li.env"
   cat >"$old_env" <<'EOF'
 FOO=bar
-NODEGET_STATUS_HOSTNAME=old.example.com
+NODEGET_STATUS_HOSTNAME=nodeget.example.com
+NODEGET_CLOUDFLARED_TOKEN='run-token'
+NODEGET_VISITOR_TOKEN='visitor-key:visitor-secret'
+NODEGET_TUNNEL_CONFIG_ENABLE=0
 # k3s 主节点。
 K3S_VERSION=
 EOF
@@ -1983,25 +2004,16 @@ NODEGET_CLOUDFLARE_ACCOUNT_ID=
 # k3s 主节点。
 K3S_VERSION=
 EOF
-  cat >"$li_env" <<'EOF'
-NODEGET_STATUS_HOSTNAME=nodeget.example.com
-NODEGET_CLOUDFLARED_TOKEN='run-token'
-NODEGET_VISITOR_TOKEN=
-NODEGET_TUNNEL_CONFIG_ENABLE=0
-EOF
-  chmod 0644 "$li_env"
   NODEGET_DEFAULT_TUNNEL_ID=52a24e2a-82dc-45b0-ab30-bef831425dfd
   NODEGET_DEFAULT_ZONE_ID=8e60f95b7b37991976bb8db6df4ea2de
-  merge_nodeget_env_files "$old_env" "$example_env" "$li_env" c23c771ead9657dab9308b8601bd02d9
-  li_env_mode=$(stat -c %a "$li_env" 2>/dev/null || stat -f %Lp "$li_env")
-  [ "$li_env_mode" = 600 ] || die ".env-li 权限合并自检失败。"
+  merge_nodeget_env_files "$old_env" "$example_env" c23c771ead9657dab9308b8601bd02d9
   sh -c '
     set -eu
     . "$1"
     [ "$FOO" = bar ]
     [ "$NODEGET_STATUS_HOSTNAME" = nodeget.example.com ]
     [ "$NODEGET_STATUS_SITE_NAME" = "Hollow Net Status" ]
-    [ "$NODEGET_VISITOR_TOKEN" = "" ]
+    [ "$NODEGET_VISITOR_TOKEN" = "visitor-key:visitor-secret" ]
     [ "$NODEGET_TUNNEL_CONFIG_ENABLE" = 0 ]
     [ "$NODEGET_CLOUDFLARE_ACCOUNT_ID" = c23c771ead9657dab9308b8601bd02d9 ]
     [ "$NODEGET_TUNNEL_ID" = 52a24e2a-82dc-45b0-ab30-bef831425dfd ]
@@ -2040,7 +2052,7 @@ self_test() {
   self_test_env_merge
   rm -rf "$self_root"
   SELF_TEST_ROOT=''
-  log "基础自检通过；前端魔改构建请单独执行 --self-test-build。"
+  log "基础自检通过；前端构建检查使用 --self-test-build。"
 }
 
 self_test_build() {
