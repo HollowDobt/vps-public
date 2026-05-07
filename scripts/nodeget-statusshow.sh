@@ -1186,6 +1186,7 @@ hollow_id() {
 }
 
 write_once() {
+  rm -f "${TMP_DIR}"/hollow-status.* "${TMP_DIR}"/hollow-rows.* "${TMP_DIR}"/hollow-nodes.* 2>/dev/null || true
   status_file="${TMP_DIR}/hollow-status.$$"
   rows_file="${TMP_DIR}/hollow-rows.$$"
   out_file="${TMP_DIR}/hollow-nodes.$$"
@@ -1196,6 +1197,7 @@ write_once() {
   elif ! tailscale status --json >"$status_file" 2>/dev/null; then
     printf '{"generated_at":%s,"source":"hollow-net","nodes":[]}\n' "$now" >"$out_file"
     mv "$out_file" "$HOLLOW_JSON"
+    rm -f "$status_file" "$rows_file" "$out_file"
     return 0
   fi
 
@@ -1237,6 +1239,7 @@ write_once() {
   } >"$out_file"
   mv "$out_file" "$HOLLOW_JSON"
   chmod 0644 "$HOLLOW_JSON"
+  rm -f "$status_file" "$rows_file" "$out_file"
 }
 
 if [ "${NODEGET_HOLLOW_SYNC_ONCE:-0}" = 1 ]; then
