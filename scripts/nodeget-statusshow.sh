@@ -398,6 +398,9 @@ apply_defaults() {
   NODEGET_RELEASE_REPO="${NODEGET_RELEASE_REPO:-GenshinMinecraft/NodeGet}"
   NODEGET_STATUSSHOW_REPO="${NODEGET_STATUSSHOW_REPO:-NodeSeekDev/NodeGet-StatusShow}"
   NODEGET_STATUSSHOW_REF="${NODEGET_STATUSSHOW_REF:-276786c0853dbdbbdbfaf529d6b02dad501d689f}"
+  NODEGET_STATUSSHOW_VITE_VERSION="${NODEGET_STATUSSHOW_VITE_VERSION:-6.3.5}"
+  NODEGET_STATUSSHOW_REACT_PLUGIN_VERSION="${NODEGET_STATUSSHOW_REACT_PLUGIN_VERSION:-4.7.0}"
+  NODEGET_STATUSSHOW_TYPES_NODE_VERSION="${NODEGET_STATUSSHOW_TYPES_NODE_VERSION:-20.19.25}"
 
   NODEGET_STATUS_HOSTNAME="${NODEGET_STATUS_HOSTNAME:-nodeget.hlwdot.com}"
   NODEGET_STATUS_SITE_NAME="${NODEGET_STATUS_SITE_NAME:-Hollow Net Status}"
@@ -998,12 +1001,25 @@ write_statusshow_config() {
 EOF
 }
 
+pin_statusshow_build_toolchain() {
+  log "固定 StatusShow 构建工具链：vite ${NODEGET_STATUSSHOW_VITE_VERSION}"
+  (
+    cd "$SRC_DIR"
+    npm pkg set \
+      "devDependencies.vite=${NODEGET_STATUSSHOW_VITE_VERSION}" \
+      "devDependencies.@vitejs/plugin-react=${NODEGET_STATUSSHOW_REACT_PLUGIN_VERSION}" \
+      "devDependencies.@types/node=${NODEGET_STATUSSHOW_TYPES_NODE_VERSION}"
+    npm install --package-lock-only --ignore-scripts --no-audit --no-fund --cache "$npm_cache"
+  )
+}
+
 build_statusshow() {
   npm_cache="${TMP_DIR}/${SCRIPT_NAME}.$$.npm-cache"
 
   clone_statusshow_source
   patch_statusshow_source
   write_statusshow_config
+  pin_statusshow_build_toolchain
   log "安装 StatusShow 前端依赖并构建。"
   rm -rf "$npm_cache"
   (
@@ -1616,6 +1632,7 @@ self_test_frontend_build() {
   clone_statusshow_source
   patch_statusshow_source
   write_statusshow_config
+  pin_statusshow_build_toolchain
   rm -rf "$npm_cache"
   (
     cd "$SRC_DIR"
