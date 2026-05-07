@@ -718,7 +718,6 @@ write_tailnet_dnsmasq_conf() {
     printf 'no-resolv\n'
     printf 'listen-address=127.0.0.1\n'
     printf 'bind-interfaces\n'
-    printf 'local-service=host\n'
     printf 'cache-size=1000\n'
     printf '\n'
     printf '%s\n' "$upstreams" | while IFS= read -r upstream; do
