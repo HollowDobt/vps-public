@@ -72,8 +72,8 @@ usage() {
   - 只读检查当前节点已在 hollow-net，不执行 Headscale 接入。
   - NodeGet Server 与 Caddy 都只监听 127.0.0.1。
   - Agent 内网入口只绑定 hollow-net IPv4，不监听公网。
-  - Cloudflare 只使用 Tunnel token，不需要 Zone DNS API key。
-  - Cloudflare public hostname 的 service 指向 http://127.0.0.1:8221。
+  - Cloudflare 使用 Tunnel token 运行隧道；可用最小权限 API token
+    幂等配置 healthy-page public hostname 和 proxied CNAME。
 EOF
 }
 
@@ -289,6 +289,12 @@ apply_defaults() {
   NODEGET_CLOUDFLARED_ENABLE="${NODEGET_CLOUDFLARED_ENABLE:-1}"
   NODEGET_CLOUDFLARED_TOKEN="${NODEGET_CLOUDFLARED_TOKEN:-}"
   NODEGET_CLOUDFLARED_VERSION="${NODEGET_CLOUDFLARED_VERSION:-2026.3.0}"
+  NODEGET_TUNNEL_CONFIG_ENABLE="${NODEGET_TUNNEL_CONFIG_ENABLE:-auto}"
+  NODEGET_TUNNEL_NAME="${NODEGET_TUNNEL_NAME:-healthy-page}"
+  NODEGET_DNS_CONFIG_TOKEN="${NODEGET_DNS_CONFIG_TOKEN:-}"
+  NODEGET_CLOUDFLARE_ACCOUNT_ID="${NODEGET_CLOUDFLARE_ACCOUNT_ID:-${CLOUDFLARE_ACCOUNT_ID:-}}"
+  NODEGET_CLOUDFLARE_ZONE="${NODEGET_CLOUDFLARE_ZONE:-${CLOUDFLARE_ZONE:-hlwdot.com}}"
+  NODEGET_CLOUDFLARE_ZONE_ID="${NODEGET_CLOUDFLARE_ZONE_ID:-${CLOUDFLARE_ZONE_ID:-}}"
 
   NODEGET_HOLLOW_SYNC_INTERVAL_SEC="${NODEGET_HOLLOW_SYNC_INTERVAL_SEC:-30}"
   NODEGET_HOLLOW_DNS_SUFFIXES="${NODEGET_HOLLOW_DNS_SUFFIXES:-${HEADSCALE_DNS_BASE_DOMAIN},hlwdot.com}"
@@ -315,6 +321,10 @@ validate_input() {
   validate_bool NODEGET_CLOUDFLARED_ENABLE "$NODEGET_CLOUDFLARED_ENABLE"
   validate_bool NODEGET_HOLLOW_PUBLISH_IP "$NODEGET_HOLLOW_PUBLISH_IP"
   validate_bool NODEGET_AGENT_INGRESS_ENABLE "$NODEGET_AGENT_INGRESS_ENABLE"
+  case "$NODEGET_TUNNEL_CONFIG_ENABLE" in
+    auto|0|1|true|false) ;;
+    *) die "NODEGET_TUNNEL_CONFIG_ENABLE 只能是 auto/0/1/true/false。" ;;
+  esac
   case "$NODEGET_JSONRPC_MAX_CONNECTIONS" in
     ''|*[!0-9]*) die "NODEGET_JSONRPC_MAX_CONNECTIONS 必须是数字。" ;;
   esac
@@ -339,6 +349,28 @@ validate_input() {
   if [ "$NODEGET_CLOUDFLARED_ENABLE" = 1 ] || [ "$NODEGET_CLOUDFLARED_ENABLE" = true ]; then
     [ -n "$NODEGET_CLOUDFLARED_TOKEN" ] || die "请填写 NODEGET_CLOUDFLARED_TOKEN。"
   fi
+  if tunnel_config_enabled; then
+    [ -n "$NODEGET_DNS_CONFIG_TOKEN" ] || die "请填写 NODEGET_DNS_CONFIG_TOKEN。"
+    case "$NODEGET_TUNNEL_NAME" in
+      ''|*/*|*[!A-Za-z0-9_.-]*) die "NODEGET_TUNNEL_NAME 格式错误。" ;;
+    esac
+    if [ -n "$NODEGET_CLOUDFLARE_ACCOUNT_ID" ]; then
+      case "$NODEGET_CLOUDFLARE_ACCOUNT_ID" in
+        *[!A-Fa-f0-9]*)
+          die "NODEGET_CLOUDFLARE_ACCOUNT_ID 格式错误。"
+          ;;
+      esac
+      [ "${#NODEGET_CLOUDFLARE_ACCOUNT_ID}" -eq 32 ] || die "NODEGET_CLOUDFLARE_ACCOUNT_ID 格式错误。"
+    fi
+  fi
+}
+
+tunnel_config_enabled() {
+  case "$NODEGET_TUNNEL_CONFIG_ENABLE" in
+    1|true) return 0 ;;
+    0|false) return 1 ;;
+    auto) [ -n "$NODEGET_DNS_CONFIG_TOKEN" ] ;;
+  esac
 }
 
 require_hollow_net() {
@@ -1119,6 +1151,162 @@ EOF
   chmod 0755 "$init_file"
 }
 
+urlencode_component() {
+  jq -rn --arg value "$1" '$value | @uri'
+}
+
+cloudflare_api() {
+  method="$1"
+  path="$2"
+  output="$3"
+  body="${4:-}"
+  url="https://api.cloudflare.com/client/v4${path}"
+
+  if [ -n "$body" ]; then
+    if ! status=$(curl -sS --retry 3 --connect-timeout 15 -o "$output" -w '%{http_code}' \
+      -X "$method" "$url" \
+      -H "Authorization: Bearer ${NODEGET_DNS_CONFIG_TOKEN}" \
+      -H "Content-Type: application/json" \
+      --data @"$body"); then
+      die "Cloudflare API 请求失败：${method} ${path}"
+    fi
+  else
+    if ! status=$(curl -sS --retry 3 --connect-timeout 15 -o "$output" -w '%{http_code}' \
+      -X "$method" "$url" \
+      -H "Authorization: Bearer ${NODEGET_DNS_CONFIG_TOKEN}"); then
+      die "Cloudflare API 请求失败：${method} ${path}"
+    fi
+  fi
+
+  case "$status" in
+    2*) ;;
+    *)
+      jq -r '.errors[]?.message // empty' "$output" 2>/dev/null | sed -n '1,5p' >&2 || true
+      die "Cloudflare API 返回 HTTP ${status}：${method} ${path}"
+      ;;
+  esac
+  jq -e '.success == true' "$output" >/dev/null 2>&1 || {
+    jq -r '.errors[]?.message // empty' "$output" 2>/dev/null | sed -n '1,5p' >&2 || true
+    die "Cloudflare API 返回失败：${method} ${path}"
+  }
+}
+
+cloudflare_account_id() {
+  if [ -n "$NODEGET_CLOUDFLARE_ACCOUNT_ID" ]; then
+    printf '%s\n' "$NODEGET_CLOUDFLARE_ACCOUNT_ID"
+    return 0
+  fi
+
+  out="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-accounts.json"
+  cloudflare_api GET '/accounts?per_page=2' "$out"
+  count=$(jq '.result | length' "$out")
+  [ "$count" = 1 ] || die "无法唯一确定 Cloudflare account；请填写 NODEGET_CLOUDFLARE_ACCOUNT_ID。"
+  jq -r '.result[0].id' "$out"
+}
+
+cloudflare_zone_id() {
+  if [ -n "$NODEGET_CLOUDFLARE_ZONE_ID" ]; then
+    printf '%s\n' "$NODEGET_CLOUDFLARE_ZONE_ID"
+    return 0
+  fi
+
+  zone="$NODEGET_CLOUDFLARE_ZONE"
+  [ -n "$zone" ] || zone=$(printf '%s\n' "$NODEGET_STATUS_HOSTNAME" | awk -F. 'NF >= 2 { print $(NF-1) "." $NF }')
+  [ -n "$zone" ] || die "无法确定 Cloudflare zone；请填写 NODEGET_CLOUDFLARE_ZONE_ID。"
+  out="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-zones.json"
+  cloudflare_api GET "/zones?name=$(urlencode_component "$zone")&status=active&per_page=5" "$out"
+  count=$(jq --arg zone "$zone" '[.result[] | select(.name == $zone)] | length' "$out")
+  [ "$count" = 1 ] || die "无法唯一确定 Cloudflare zone：$zone；请填写 NODEGET_CLOUDFLARE_ZONE_ID。"
+  jq -r --arg zone "$zone" '.result[] | select(.name == $zone) | .id' "$out"
+}
+
+cloudflare_tunnel_id() {
+  account_id="$1"
+  out="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-tunnels.json"
+  cloudflare_api GET "/accounts/${account_id}/cfd_tunnel?name=$(urlencode_component "$NODEGET_TUNNEL_NAME")&is_deleted=false&per_page=5" "$out"
+  count=$(jq --arg name "$NODEGET_TUNNEL_NAME" '[.result[] | select(.name == $name and (.deleted_at == null))] | length' "$out")
+  [ "$count" = 1 ] || die "无法唯一确定 Cloudflare Tunnel：$NODEGET_TUNNEL_NAME。"
+  jq -r --arg name "$NODEGET_TUNNEL_NAME" '.result[] | select(.name == $name and (.deleted_at == null)) | .id' "$out"
+}
+
+build_tunnel_config_body() {
+  current_file="$1"
+  output_file="$2"
+  host="$3"
+  service="$4"
+
+  jq --arg host "$host" --arg service "$service" '
+    (.result.config // {}) as $config |
+    {
+      config: (
+        $config |
+        .ingress = (((.ingress // []) | map(select((.hostname // "") != $host))) + [
+          { hostname: $host, service: $service }
+        ])
+      )
+    }
+  ' "$current_file" >"$output_file"
+}
+
+cloudflare_configure_tunnel() {
+  tunnel_config_enabled || return 0
+
+  account_id=$(cloudflare_account_id)
+  zone_id=$(cloudflare_zone_id)
+  tunnel_id=$(cloudflare_tunnel_id "$account_id")
+  service="http://${NODEGET_STATUS_LISTEN}"
+  dns_target="${tunnel_id}.cfargotunnel.com"
+  current="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-tunnel-config.current.json"
+  desired="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-tunnel-config.desired.json"
+  response="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-tunnel-config.response.json"
+
+  log "配置 Cloudflare Tunnel public hostname：${NODEGET_TUNNEL_NAME} -> ${NODEGET_STATUS_HOSTNAME}"
+  cloudflare_api GET "/accounts/${account_id}/cfd_tunnel/${tunnel_id}/configurations" "$current"
+  build_tunnel_config_body "$current" "$desired" "$NODEGET_STATUS_HOSTNAME" "$service"
+  if jq -e --arg host "$NODEGET_STATUS_HOSTNAME" --arg service "$service" '
+    (.result.config.ingress // []) | any((.hostname // "") == $host and .service == $service)
+  ' "$current" >/dev/null 2>&1; then
+    log "Cloudflare Tunnel ingress 已是目标配置。"
+  else
+    cloudflare_api PUT "/accounts/${account_id}/cfd_tunnel/${tunnel_id}/configurations" "$response" "$desired"
+  fi
+
+  cloudflare_upsert_dns_record "$zone_id" "$dns_target"
+}
+
+cloudflare_upsert_dns_record() {
+  zone_id="$1"
+  dns_target="$2"
+  records="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-dns-records.json"
+  body="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-dns-record.body.json"
+  response="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-dns-record.response.json"
+
+  cloudflare_api GET "/zones/${zone_id}/dns_records?name.exact=$(urlencode_component "$NODEGET_STATUS_HOSTNAME")&per_page=100" "$records"
+  non_cname_count=$(jq '[.result[] | select(.type != "CNAME")] | length' "$records")
+  [ "$non_cname_count" = 0 ] || die "Cloudflare DNS 已存在非 CNAME 的 ${NODEGET_STATUS_HOSTNAME}，为避免误改已停止。"
+  cname_count=$(jq '[.result[] | select(.type == "CNAME")] | length' "$records")
+
+  jq -n \
+    --arg name "$NODEGET_STATUS_HOSTNAME" \
+    --arg content "$dns_target" \
+    '{type:"CNAME", name:$name, content:$content, ttl:1, proxied:true, comment:"managed by hlwdot nodeget-statusshow"}' >"$body"
+
+  if [ "$cname_count" = 0 ]; then
+    log "创建 Cloudflare Tunnel CNAME：${NODEGET_STATUS_HOSTNAME} -> ${dns_target}"
+    cloudflare_api POST "/zones/${zone_id}/dns_records" "$response" "$body"
+    return 0
+  fi
+  [ "$cname_count" = 1 ] || die "Cloudflare DNS 存在多个 ${NODEGET_STATUS_HOSTNAME} CNAME，已停止。"
+
+  record_id=$(jq -r '.result[] | select(.type == "CNAME") | .id' "$records")
+  if jq -e --arg content "$dns_target" '.result[] | select(.type == "CNAME") | .content == $content and .proxied == true' "$records" >/dev/null; then
+    log "Cloudflare Tunnel CNAME 已是目标配置。"
+  else
+    log "更新 Cloudflare Tunnel CNAME：${NODEGET_STATUS_HOSTNAME} -> ${dns_target}"
+    cloudflare_api PATCH "/zones/${zone_id}/dns_records/${record_id}" "$response" "$body"
+  fi
+}
+
 start_services() {
   rc-update add "$NODEGET_SERVER_SERVICE" default >/dev/null
   if [ "$NODEGET_AGENT_INGRESS_ENABLE" = 1 ] || [ "$NODEGET_AGENT_INGRESS_ENABLE" = true ]; then
@@ -1376,6 +1564,33 @@ LISTEN 0      4096       0.0.0.0:2211        0.0.0.0:*"
   log "自检通过：NodeGet 监听过滤。"
 }
 
+self_test_cloudflare_config_body() {
+  current="${TMP_DIR}/cf-current.json"
+  desired="${TMP_DIR}/cf-desired.json"
+  cat >"$current" <<'EOF'
+{
+  "success": true,
+  "result": {
+    "config": {
+      "originRequest": {"connectTimeout": 10},
+      "ingress": [
+        {"hostname": "old.example.com", "service": "http://127.0.0.1:9000"},
+        {"hostname": "nodeget.example.com", "service": "http://127.0.0.1:1111"}
+      ]
+    }
+  }
+}
+EOF
+  build_tunnel_config_body "$current" "$desired" "nodeget.example.com" "http://127.0.0.1:8221"
+  jq -e '
+    .config.originRequest.connectTimeout == 10 and
+    ([.config.ingress[] | select(.hostname == "old.example.com")] | length) == 1 and
+    ([.config.ingress[] | select(.hostname == "nodeget.example.com" and .service == "http://127.0.0.1:8221")] | length) == 1 and
+    ([.config.ingress[] | select(.hostname == "nodeget.example.com")] | length) == 1
+  ' "$desired" >/dev/null || die "Cloudflare Tunnel 配置合成自检失败。"
+  log "自检通过：Cloudflare Tunnel 配置合成。"
+}
+
 self_test_common_setup() {
   self_root=$(mktemp -d "${TMPDIR:-/tmp}/nodeget-statusshow-selftest-state.XXXXXX")
   SELF_TEST_ROOT="$self_root"
@@ -1400,6 +1615,7 @@ self_test() {
   self_test_menu
   self_test_security_static
   self_test_listener_filters
+  self_test_cloudflare_config_body
   rm -rf "$self_root"
   SELF_TEST_ROOT=''
   log "基础自检通过；前端魔改构建请单独执行 --self-test-build。"
@@ -1413,6 +1629,7 @@ self_test_build() {
   self_test_menu
   self_test_security_static
   self_test_listener_filters
+  self_test_cloudflare_config_body
   self_test_frontend_build
   rm -rf "$self_root"
   SELF_TEST_ROOT=''
@@ -1474,6 +1691,7 @@ main() {
   write_hollow_sync_service
   write_caddy_config
   write_caddy_service
+  cloudflare_configure_tunnel
   write_cloudflared_service
   start_services
   verify_services
