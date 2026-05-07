@@ -749,7 +749,7 @@ nodeget_db_exists() {
 }
 
 run_as_nodeget() {
-  su -s /bin/sh nodeget -c "$*"
+  su -s /bin/sh nodeget -c "cd /var/lib/nodeget-server && $*"
 }
 
 init_nodeget_server() {
