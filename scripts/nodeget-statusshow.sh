@@ -246,6 +246,9 @@ merge_nodeget_env_files() {
   if [ -n "$account_id" ] && ! grep -q '^NODEGET_CLOUDFLARE_ACCOUNT_ID=' "$overrides"; then
     printf 'NODEGET_CLOUDFLARE_ACCOUNT_ID=%s\n' "$account_id" >>"$overrides"
   fi
+  if [ -n "${NODEGET_DEFAULT_TUNNEL_ID:-}" ] && ! grep -q '^NODEGET_TUNNEL_ID=' "$overrides"; then
+    printf 'NODEGET_TUNNEL_ID=%s\n' "$NODEGET_DEFAULT_TUNNEL_ID" >>"$overrides"
+  fi
 
   {
     awk '
@@ -294,6 +297,7 @@ merge_nodeget_env_files() {
     : "${NODEGET_VISITOR_TOKEN:?}"
     : "${NODEGET_DNS_CONFIG_TOKEN:?}"
     [ "${NODEGET_TUNNEL_NAME:-}" = healthy-page ]
+    : "${NODEGET_TUNNEL_ID:?}"
     case "${NODEGET_SERVER_LISTEN:-127.0.0.1:2211}" in
       127.0.0.1:*|localhost:*) ;;
       *) exit 11 ;;
@@ -314,6 +318,8 @@ merge_nodeget_env_files() {
 
 merge_env() {
   account_id="${NODEGET_CLOUDFLARE_ACCOUNT_ID:-${CLOUDFLARE_ACCOUNT_ID:-c23c771ead9657dab9308b8601bd02d9}}"
+  NODEGET_DEFAULT_TUNNEL_ID="${NODEGET_DEFAULT_TUNNEL_ID:-52a24e2a-82dc-45b0-ab30-bef831425dfd}"
+  export NODEGET_DEFAULT_TUNNEL_ID
   merge_nodeget_env_files "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.example" "${SCRIPT_DIR}/.env-li" "$account_id"
   log ".env 已合并 NodeGet 配置；.env-li 权限已收紧。"
 }
@@ -407,6 +413,7 @@ apply_defaults() {
   NODEGET_CLOUDFLARED_VERSION="${NODEGET_CLOUDFLARED_VERSION:-2026.3.0}"
   NODEGET_TUNNEL_CONFIG_ENABLE="${NODEGET_TUNNEL_CONFIG_ENABLE:-auto}"
   NODEGET_TUNNEL_NAME="${NODEGET_TUNNEL_NAME:-healthy-page}"
+  NODEGET_TUNNEL_ID="${NODEGET_TUNNEL_ID:-}"
   NODEGET_DNS_CONFIG_TOKEN="${NODEGET_DNS_CONFIG_TOKEN:-}"
   NODEGET_CLOUDFLARE_ACCOUNT_ID="${NODEGET_CLOUDFLARE_ACCOUNT_ID:-${CLOUDFLARE_ACCOUNT_ID:-}}"
   NODEGET_CLOUDFLARE_ZONE="${NODEGET_CLOUDFLARE_ZONE:-${CLOUDFLARE_ZONE:-hlwdot.com}}"
@@ -470,6 +477,12 @@ validate_input() {
     case "$NODEGET_TUNNEL_NAME" in
       ''|*/*|*[!A-Za-z0-9_.-]*) die "NODEGET_TUNNEL_NAME 格式错误。" ;;
     esac
+    if [ -n "$NODEGET_TUNNEL_ID" ]; then
+      case "$NODEGET_TUNNEL_ID" in
+        ????????-????-????-????-????????????) ;;
+        *) die "NODEGET_TUNNEL_ID 格式错误。" ;;
+      esac
+    fi
     if [ -n "$NODEGET_CLOUDFLARE_ACCOUNT_ID" ]; then
       case "$NODEGET_CLOUDFLARE_ACCOUNT_ID" in
         *[!A-Fa-f0-9]*)
@@ -1338,6 +1351,11 @@ cloudflare_zone_id() {
 
 cloudflare_tunnel_id() {
   account_id="$1"
+  if [ -n "$NODEGET_TUNNEL_ID" ]; then
+    printf '%s\n' "$NODEGET_TUNNEL_ID"
+    return 0
+  fi
+
   out="${TMP_DIR}/${SCRIPT_NAME}.$$.cf-tunnels.json"
   cloudflare_api GET "/accounts/${account_id}/cfd_tunnel?name=$(urlencode_component "$NODEGET_TUNNEL_NAME")&is_deleted=false&per_page=5" "$out"
   count=$(jq --arg name "$NODEGET_TUNNEL_NAME" '[.result[] | select(.name == $name and (.deleted_at == null))] | length' "$out")
@@ -1730,6 +1748,7 @@ NODEGET_SERVER_LISTEN=127.0.0.1:2211
 NODEGET_STATUS_LISTEN=127.0.0.1:8221
 NODEGET_AGENT_LISTEN_ADDR=auto
 NODEGET_TUNNEL_NAME=healthy-page
+NODEGET_TUNNEL_ID=
 NODEGET_CLOUDFLARE_ACCOUNT_ID=
 # k3s 主节点。
 K3S_VERSION=
@@ -1741,6 +1760,7 @@ NODEGET_VISITOR_TOKEN='visitor-token'
 NODEGET_DNS_CONFIG_TOKEN='config-token'
 EOF
   chmod 0644 "$li_env"
+  NODEGET_DEFAULT_TUNNEL_ID=52a24e2a-82dc-45b0-ab30-bef831425dfd
   merge_nodeget_env_files "$old_env" "$example_env" "$li_env" c23c771ead9657dab9308b8601bd02d9
   [ "$(stat -f %Lp "$li_env" 2>/dev/null || stat -c %a "$li_env")" = 600 ] || die ".env-li 权限合并自检失败。"
   sh -c '
@@ -1750,6 +1770,7 @@ EOF
     [ "$NODEGET_STATUS_HOSTNAME" = nodeget.example.com ]
     [ "$NODEGET_STATUS_SITE_NAME" = "Hollow Net Status" ]
     [ "$NODEGET_CLOUDFLARE_ACCOUNT_ID" = c23c771ead9657dab9308b8601bd02d9 ]
+    [ "$NODEGET_TUNNEL_ID" = 52a24e2a-82dc-45b0-ab30-bef831425dfd ]
     [ "$K3S_VERSION" = "" ]
   ' sh "$old_env" || die ".env 合并自检失败。"
   [ "$(grep -c '^NODEGET_STATUS_HOSTNAME=' "$old_env")" = 1 ] || die ".env 合并自检失败：重复 NODEGET_STATUS_HOSTNAME。"
