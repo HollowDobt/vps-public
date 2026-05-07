@@ -61,6 +61,7 @@ usage() {
   sh $SCRIPT_NAME --merge-env
   sh $SCRIPT_NAME --self-test
   sh $SCRIPT_NAME --self-test-build
+  sh $SCRIPT_NAME --build-prebuilt-asset scripts/assets/nodeget-statusshow-dist.tar.gz
 
 必填：
   NODEGET_STATUS_HOSTNAME=nodeget.example.com
@@ -298,10 +299,20 @@ merge_nodeget_env_files() {
     set +a
     : "${NODEGET_STATUS_HOSTNAME:?}"
     : "${NODEGET_CLOUDFLARED_TOKEN:?}"
-    : "${NODEGET_VISITOR_TOKEN:?}"
-    : "${NODEGET_DNS_CONFIG_TOKEN:?}"
     [ "${NODEGET_TUNNEL_NAME:-}" = healthy-page ]
     : "${NODEGET_TUNNEL_ID:?}"
+    case "${NODEGET_TUNNEL_CONFIG_ENABLE:-auto}" in
+      auto|0|1|true|false) ;;
+      *) exit 13 ;;
+    esac
+    case "${NODEGET_CLOUDFLARED_ENABLE:-1}" in
+      1|true) : "${NODEGET_CLOUDFLARED_TOKEN:?}" ;;
+    esac
+    case "${NODEGET_TUNNEL_CONFIG_ENABLE:-auto}" in
+      1|true) : "${NODEGET_DNS_CONFIG_TOKEN:?}" ;;
+      auto) [ -z "${NODEGET_DNS_CONFIG_TOKEN:-}" ] || : "${NODEGET_DNS_CONFIG_TOKEN:?}" ;;
+    esac
+    [ "${NODEGET_VISITOR_TOKEN:-}" != "YOUR_TOKEN_HERE" ]
     case "${NODEGET_SERVER_LISTEN:-127.0.0.1:2211}" in
       127.0.0.1:*|localhost:*) ;;
       *) exit 11 ;;
@@ -386,7 +397,11 @@ ensure_community_repo() {
 install_packages() {
   ensure_community_repo
   apk update
-  apk add ca-certificates curl git jq nodejs npm openrc caddy coreutils iproute2 socat
+  packages="ca-certificates curl jq openrc caddy coreutils iproute2 socat"
+  if [ "${NODEGET_STATUSSHOW_BUILD_MODE:-prebuilt}" = build ]; then
+    packages="${packages} git nodejs npm"
+  fi
+  apk add $packages
   command_exists update-ca-certificates && update-ca-certificates >/dev/null 2>&1 || true
 }
 
@@ -402,6 +417,8 @@ apply_defaults() {
   NODEGET_STATUSSHOW_REACT_PLUGIN_VERSION="${NODEGET_STATUSSHOW_REACT_PLUGIN_VERSION:-4.7.0}"
   NODEGET_STATUSSHOW_TYPES_NODE_VERSION="${NODEGET_STATUSSHOW_TYPES_NODE_VERSION:-20.19.25}"
   NODEGET_STATUSSHOW_MINIFY="${NODEGET_STATUSSHOW_MINIFY:-0}"
+  NODEGET_STATUSSHOW_BUILD_MODE="${NODEGET_STATUSSHOW_BUILD_MODE:-prebuilt}"
+  NODEGET_STATUSSHOW_PREBUILT_ARCHIVE="${NODEGET_STATUSSHOW_PREBUILT_ARCHIVE:-${SCRIPT_DIR}/assets/nodeget-statusshow-dist.tar.gz}"
 
   NODEGET_STATUS_HOSTNAME="${NODEGET_STATUS_HOSTNAME:-nodeget.hlwdot.com}"
   NODEGET_STATUS_SITE_NAME="${NODEGET_STATUS_SITE_NAME:-Hollow Net Status}"
@@ -455,6 +472,10 @@ validate_input() {
   validate_bool NODEGET_HOLLOW_PUBLISH_IP "$NODEGET_HOLLOW_PUBLISH_IP"
   validate_bool NODEGET_AGENT_INGRESS_ENABLE "$NODEGET_AGENT_INGRESS_ENABLE"
   validate_bool NODEGET_STATUSSHOW_MINIFY "$NODEGET_STATUSSHOW_MINIFY"
+  case "$NODEGET_STATUSSHOW_BUILD_MODE" in
+    prebuilt|build) ;;
+    *) die "NODEGET_STATUSSHOW_BUILD_MODE 只能是 prebuilt 或 build。" ;;
+  esac
   case "$NODEGET_TUNNEL_CONFIG_ENABLE" in
     auto|0|1|true|false) ;;
     *) die "NODEGET_TUNNEL_CONFIG_ENABLE 只能是 auto/0/1/true/false。" ;;
@@ -984,9 +1005,10 @@ import { mergeHollowNodes, useHollowNodes } from './hooks/useHollowNodes'|" "$ap
   hollow_net_inventory?: boolean/" "$types_file"
 }
 
-write_statusshow_config() {
-  mkdir -p "${SRC_DIR}/public"
-  cat >"${SRC_DIR}/public/config.json" <<EOF
+write_statusshow_config_file() {
+  config_output="$1"
+  mkdir -p "$(dirname "$config_output")"
+  cat >"$config_output" <<EOF
 {
   "site_name": $(json_string "$NODEGET_STATUS_SITE_NAME"),
   "site_logo": $(json_string "$NODEGET_STATUS_LOGO"),
@@ -1003,6 +1025,10 @@ write_statusshow_config() {
 EOF
 }
 
+write_statusshow_config() {
+  write_statusshow_config_file "${SRC_DIR}/public/config.json"
+}
+
 pin_statusshow_build_toolchain() {
   log "固定 StatusShow 构建工具链：vite ${NODEGET_STATUSSHOW_VITE_VERSION}"
   (
@@ -1017,6 +1043,11 @@ pin_statusshow_build_toolchain() {
 
 build_statusshow() {
   npm_cache="${TMP_DIR}/${SCRIPT_NAME}.$$.npm-cache"
+
+  if [ "$NODEGET_STATUSSHOW_BUILD_MODE" = prebuilt ]; then
+    install_prebuilt_statusshow
+    return 0
+  fi
 
   clone_statusshow_source
   patch_statusshow_source
@@ -1037,6 +1068,23 @@ build_statusshow() {
   rm -rf "${DIST_DIR}.new"
   mkdir -p "${DIST_DIR}.new"
   cp -R "${SRC_DIR}/dist/." "${DIST_DIR}.new/"
+  write_statusshow_config_file "${DIST_DIR}.new/config.json"
+  rm -rf "$DIST_DIR"
+  mv "${DIST_DIR}.new" "$DIST_DIR"
+  chown -R caddy:caddy "$DIST_DIR"
+}
+
+install_prebuilt_statusshow() {
+  prebuilt_archive="$NODEGET_STATUSSHOW_PREBUILT_ARCHIVE"
+  [ -r "$prebuilt_archive" ] || die "找不到 StatusShow 预构建资产：$prebuilt_archive"
+  tar -tzf "$prebuilt_archive" | grep -qx './index.html' || die "StatusShow 预构建资产缺少 index.html。"
+  if tar -tzf "$prebuilt_archive" | awk '$0 ~ /^\/|(^|\/)\.\.(\/|$)/ { bad = 1 } END { exit bad ? 0 : 1 }'; then
+    die "StatusShow 预构建资产包含不安全路径。"
+  fi
+  rm -rf "${DIST_DIR}.new"
+  mkdir -p "${DIST_DIR}.new"
+  tar -xzf "$prebuilt_archive" -C "${DIST_DIR}.new"
+  write_statusshow_config_file "${DIST_DIR}.new/config.json"
   rm -rf "$DIST_DIR"
   mv "${DIST_DIR}.new" "$DIST_DIR"
   chown -R caddy:caddy "$DIST_DIR"
@@ -1657,6 +1705,46 @@ self_test_frontend_build() {
   log "自检通过：魔改 StatusShow 可 typecheck/build。"
 }
 
+build_prebuilt_asset() {
+  prebuilt_output="$1"
+  [ -n "$prebuilt_output" ] || die "请指定预构建资产输出路径。"
+  self_test_common_setup
+  self_test_require_build
+
+  NODEGET_STATUS_HOSTNAME="nodeget-prebuilt.example.invalid"
+  NODEGET_STATUS_SITE_NAME="Prebuilt"
+  NODEGET_STATUS_FOOTER="Prebuilt"
+  NODEGET_STATUS_LOGO=""
+  NODEGET_VISITOR_TOKEN=""
+  NODEGET_SERVER_NAME="prebuilt"
+  NODEGET_STATUSSHOW_BUILD_MODE=build
+
+  clone_statusshow_source
+  patch_statusshow_source
+  write_statusshow_config
+  npm_cache="${TMP_DIR}/${SCRIPT_NAME}.$$.npm-cache"
+  pin_statusshow_build_toolchain
+  rm -rf "$npm_cache"
+  (
+    cd "$SRC_DIR"
+    npm ci --no-audit --no-fund --cache "$npm_cache"
+    npm run typecheck
+    if [ "$NODEGET_STATUSSHOW_MINIFY" = 1 ] || [ "$NODEGET_STATUSSHOW_MINIFY" = true ]; then
+      npm run build
+    else
+      npm run build -- --minify=false
+    fi
+  )
+  [ -s "${SRC_DIR}/dist/index.html" ] || die "预构建失败：缺少 dist/index.html"
+  grep -R "hollow-nodes.json" "${SRC_DIR}/dist" >/dev/null 2>&1 || die "预构建失败：产物缺少 hollow-net inventory 逻辑"
+  rm -f "${SRC_DIR}/dist/config.json"
+  mkdir -p "$(dirname "$prebuilt_output")"
+  tar -C "${SRC_DIR}/dist" -czf "$prebuilt_output" .
+  rm -rf "$npm_cache" "$self_root"
+  SELF_TEST_ROOT=''
+  log "预构建资产已写入：$prebuilt_output"
+}
+
 self_test_menu() {
   menu_file="${SCRIPT_DIR}/vps-menu.sh"
   [ -r "$menu_file" ] || return 0
@@ -1824,8 +1912,8 @@ EOF
   cat >"$li_env" <<'EOF'
 NODEGET_STATUS_HOSTNAME=nodeget.example.com
 NODEGET_CLOUDFLARED_TOKEN='run-token'
-NODEGET_VISITOR_TOKEN='visitor-token'
-NODEGET_DNS_CONFIG_TOKEN='config-token'
+NODEGET_VISITOR_TOKEN=
+NODEGET_TUNNEL_CONFIG_ENABLE=0
 EOF
   chmod 0644 "$li_env"
   NODEGET_DEFAULT_TUNNEL_ID=52a24e2a-82dc-45b0-ab30-bef831425dfd
@@ -1838,6 +1926,8 @@ EOF
     [ "$FOO" = bar ]
     [ "$NODEGET_STATUS_HOSTNAME" = nodeget.example.com ]
     [ "$NODEGET_STATUS_SITE_NAME" = "Hollow Net Status" ]
+    [ "$NODEGET_VISITOR_TOKEN" = "" ]
+    [ "$NODEGET_TUNNEL_CONFIG_ENABLE" = 0 ]
     [ "$NODEGET_CLOUDFLARE_ACCOUNT_ID" = c23c771ead9657dab9308b8601bd02d9 ]
     [ "$NODEGET_TUNNEL_ID" = 52a24e2a-82dc-45b0-ab30-bef831425dfd ]
     [ "$NODEGET_CLOUDFLARE_ZONE_ID" = 8e60f95b7b37991976bb8db6df4ea2de ]
@@ -1919,6 +2009,10 @@ main() {
       ;;
     --self-test-build)
       self_test_build
+      exit 0
+      ;;
+    --build-prebuilt-asset)
+      build_prebuilt_asset "${2:-}"
       exit 0
       ;;
     --merge-env)
