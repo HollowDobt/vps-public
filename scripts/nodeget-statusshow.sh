@@ -249,6 +249,9 @@ merge_nodeget_env_files() {
   if [ -n "${NODEGET_DEFAULT_TUNNEL_ID:-}" ] && ! grep -q '^NODEGET_TUNNEL_ID=' "$overrides"; then
     printf 'NODEGET_TUNNEL_ID=%s\n' "$NODEGET_DEFAULT_TUNNEL_ID" >>"$overrides"
   fi
+  if [ -n "${NODEGET_DEFAULT_ZONE_ID:-}" ] && ! grep -q '^NODEGET_CLOUDFLARE_ZONE_ID=' "$overrides"; then
+    printf 'NODEGET_CLOUDFLARE_ZONE_ID=%s\n' "$NODEGET_DEFAULT_ZONE_ID" >>"$overrides"
+  fi
 
   {
     awk '
@@ -319,7 +322,9 @@ merge_nodeget_env_files() {
 merge_env() {
   account_id="${NODEGET_CLOUDFLARE_ACCOUNT_ID:-${CLOUDFLARE_ACCOUNT_ID:-c23c771ead9657dab9308b8601bd02d9}}"
   NODEGET_DEFAULT_TUNNEL_ID="${NODEGET_DEFAULT_TUNNEL_ID:-52a24e2a-82dc-45b0-ab30-bef831425dfd}"
+  NODEGET_DEFAULT_ZONE_ID="${NODEGET_DEFAULT_ZONE_ID:-8e60f95b7b37991976bb8db6df4ea2de}"
   export NODEGET_DEFAULT_TUNNEL_ID
+  export NODEGET_DEFAULT_ZONE_ID
   merge_nodeget_env_files "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.example" "${SCRIPT_DIR}/.env-li" "$account_id"
   log ".env 已合并 NodeGet 配置；.env-li 权限已收紧。"
 }
@@ -1761,6 +1766,7 @@ NODEGET_DNS_CONFIG_TOKEN='config-token'
 EOF
   chmod 0644 "$li_env"
   NODEGET_DEFAULT_TUNNEL_ID=52a24e2a-82dc-45b0-ab30-bef831425dfd
+  NODEGET_DEFAULT_ZONE_ID=8e60f95b7b37991976bb8db6df4ea2de
   merge_nodeget_env_files "$old_env" "$example_env" "$li_env" c23c771ead9657dab9308b8601bd02d9
   [ "$(stat -f %Lp "$li_env" 2>/dev/null || stat -c %a "$li_env")" = 600 ] || die ".env-li 权限合并自检失败。"
   sh -c '
@@ -1771,6 +1777,7 @@ EOF
     [ "$NODEGET_STATUS_SITE_NAME" = "Hollow Net Status" ]
     [ "$NODEGET_CLOUDFLARE_ACCOUNT_ID" = c23c771ead9657dab9308b8601bd02d9 ]
     [ "$NODEGET_TUNNEL_ID" = 52a24e2a-82dc-45b0-ab30-bef831425dfd ]
+    [ "$NODEGET_CLOUDFLARE_ZONE_ID" = 8e60f95b7b37991976bb8db6df4ea2de ]
     [ "$K3S_VERSION" = "" ]
   ' sh "$old_env" || die ".env 合并自检失败。"
   [ "$(grep -c '^NODEGET_STATUS_HOSTNAME=' "$old_env")" = 1 ] || die ".env 合并自检失败：重复 NODEGET_STATUS_HOSTNAME。"
