@@ -21,6 +21,9 @@ HOLLOW_OPENRC_SERVICE="${HOLLOW_OPENRC_SERVICE:-hollow-tailscaled}"
 HOLLOW_OPENRC_CONF="/etc/conf.d/${HOLLOW_OPENRC_SERVICE}"
 HOLLOW_OPENRC_INIT="/etc/init.d/${HOLLOW_OPENRC_SERVICE}"
 SPLIT_LOCAL_SCRIPT="/etc/local.d/hlwdot-split.start"
+TAILNET_DNSMASQ_CONF="/etc/dnsmasq.d/90-hlwdot-tailnet.conf"
+TAILNET_DNS_RESOLV_BACKUP="/etc/hlwdot/tailnet-dns.original-resolv.conf"
+TAILNET_DNS_UPSTREAMS_FILE="/etc/hlwdot/tailnet-dns.upstreams"
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -87,11 +90,15 @@ usage() {
   HEADSCALE_ENDPOINT_CHECK=1
   HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC=15
   HEADSCALE_AUTO_DISABLE_DNS_FIGHT=1
+  ALPINE_TAILNET_DNS_MODE=auto
+  ALPINE_TAILNET_DNS_DOMAINS=auto
+  ALPINE_TAILNET_DNS_UPSTREAMS=auto
   ALPINE_TAILSCALE_UP_TIMEOUT_SEC=120
 
 说明：
   - 仅支持 Alpine Linux + OpenRC。
   - 默认只接入 Headscale 网络，不部署 k3s。
+  - LXD 容器里默认用 dnsmasq 保留原 DNS，并把 Headscale DNS 域分流到 100.100.100.100。
   - 出站分流指 Headscale 网络内的机器访问本机代理端口。
   - 入站分流指公网端口转发到 Headscale 网络内部目标。
 EOF
@@ -183,6 +190,10 @@ validate_input() {
   validate_bool HEADSCALE_RESET "$HEADSCALE_RESET"
   validate_bool HEADSCALE_ENDPOINT_CHECK "$HEADSCALE_ENDPOINT_CHECK"
   validate_bool HEADSCALE_AUTO_DISABLE_DNS_FIGHT "$HEADSCALE_AUTO_DISABLE_DNS_FIGHT"
+  case "$ALPINE_TAILNET_DNS_MODE" in
+    auto|off|dnsmasq) ;;
+    *) die "ALPINE_TAILNET_DNS_MODE 只能是 auto、off 或 dnsmasq。" ;;
+  esac
   validate_bool ALPINE_ENABLE_COMMUNITY_REPO "$ALPINE_ENABLE_COMMUNITY_REPO"
   validate_bool ALPINE_ALLOW_INTERACTIVE_LOGIN "$ALPINE_ALLOW_INTERACTIVE_LOGIN"
   validate_bool ALPINE_KILL_STALE_TAILSCALE_UP "$ALPINE_KILL_STALE_TAILSCALE_UP"
@@ -222,6 +233,9 @@ apply_defaults() {
   HEADSCALE_ENDPOINT_CHECK="${HEADSCALE_ENDPOINT_CHECK:-1}"
   HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC="${HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC:-15}"
   HEADSCALE_AUTO_DISABLE_DNS_FIGHT="${HEADSCALE_AUTO_DISABLE_DNS_FIGHT:-1}"
+  ALPINE_TAILNET_DNS_MODE="${ALPINE_TAILNET_DNS_MODE:-auto}"
+  ALPINE_TAILNET_DNS_DOMAINS="${ALPINE_TAILNET_DNS_DOMAINS:-auto}"
+  ALPINE_TAILNET_DNS_UPSTREAMS="${ALPINE_TAILNET_DNS_UPSTREAMS:-auto}"
   HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
   ALPINE_TAILSCALE_INSTALL_SOURCE="${ALPINE_TAILSCALE_INSTALL_SOURCE:-auto}"
   ALPINE_TAILSCALE_MIN_VERSION="${ALPINE_TAILSCALE_MIN_VERSION:-1.74.0}"
@@ -303,13 +317,17 @@ ensure_community_repo() {
 }
 
 install_packages() {
+  packages='ca-certificates curl openrc openssl tar iptables iproute2'
+
   ensure_community_repo
   apk update
   if [ "$ALPINE_TAILSCALE_INSTALL_SOURCE" = apk ]; then
-    apk add ca-certificates curl openrc openssl tar iptables iproute2 tailscale tailscale-openrc
-  else
-    apk add ca-certificates curl openrc openssl tar iptables iproute2
+    packages="$packages tailscale tailscale-openrc"
   fi
+  if [ "$ALPINE_TAILNET_DNS_MODE" != off ]; then
+    packages="$packages dnsmasq"
+  fi
+  apk add $packages
   command_exists update-ca-certificates && update-ca-certificates >/dev/null 2>&1 || true
 }
 
@@ -554,7 +572,250 @@ EOF
 }
 
 split_words() {
-  printf '%s\n' "$1" | tr ',;' '\n' | awk 'NF { print }'
+  printf '%s\n' "$1" | tr ' ,;' '\n' | awk 'NF { print }'
+}
+
+valid_dns_domain() {
+  value="$1"
+  case "$value" in
+    ''|.*|*.|*[!A-Za-z0-9_.-]*|*..*|*.-*|*-.*) return 1 ;;
+    *.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+valid_dns_upstream() {
+  value="$1"
+  case "$value" in
+    ''|*[!0-9A-Fa-f:.]*) return 1 ;;
+    *.*|*:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+resolv_conf_hlwdot_managed() {
+  [ -r /etc/resolv.conf ] || return 1
+  grep -q 'HlwDot tailnet DNS resolver' /etc/resolv.conf
+}
+
+original_resolv_source() {
+  if [ -r "$TAILNET_DNS_RESOLV_BACKUP" ]; then
+    printf '%s\n' "$TAILNET_DNS_RESOLV_BACKUP"
+  else
+    printf '/etc/resolv.conf\n'
+  fi
+}
+
+resolv_search_domains() {
+  source_file=$(original_resolv_source)
+  [ -r "$source_file" ] || return 0
+  awk '
+    /^[[:space:]]*search[[:space:]]+/ {
+      for (i = 2; i <= NF; i++) print $i
+    }
+    /^[[:space:]]*domain[[:space:]]+/ {
+      print $2
+    }
+  ' "$source_file"
+}
+
+resolv_nameservers() {
+  source_file="$1"
+  [ -r "$source_file" ] || return 0
+  awk '
+    /^[[:space:]]*nameserver[[:space:]]+/ {
+      if ($2 != "127.0.0.1" && $2 != "::1" && $2 != "100.100.100.100") print $2
+    }
+  ' "$source_file"
+}
+
+tailnet_dns_domains() {
+  if [ "$ALPINE_TAILNET_DNS_DOMAINS" != auto ]; then
+    split_words "$ALPINE_TAILNET_DNS_DOMAINS"
+    return 0
+  fi
+
+  if [ -n "${HEADSCALE_DNS_BASE_DOMAIN:-}" ] && [ "$HEADSCALE_DNS_BASE_DOMAIN" != auto ]; then
+    printf '%s\n' "$HEADSCALE_DNS_BASE_DOMAIN"
+  elif [ -n "${CLOUDFLARE_ZONE:-}" ]; then
+    printf 'net.%s\n' "$(printf '%s' "$CLOUDFLARE_ZONE" | sed 's/[.]$//')"
+  fi
+}
+
+tailnet_dns_needed() {
+  case "$ALPINE_TAILNET_DNS_MODE" in
+    off) return 1 ;;
+    dnsmasq) return 0 ;;
+    auto)
+      resolv_conf_lxd_managed || tailscale_dns_fight_reported || resolv_conf_hlwdot_managed
+      ;;
+  esac
+}
+
+tailnet_dns_upstreams() {
+  source_file=$(original_resolv_source)
+  upstreams=''
+
+  if [ "$ALPINE_TAILNET_DNS_UPSTREAMS" != auto ]; then
+    split_words "$ALPINE_TAILNET_DNS_UPSTREAMS"
+    return 0
+  fi
+
+  if [ -r /etc/resolv.conf ] && ! resolv_conf_hlwdot_managed; then
+    upstreams=$(resolv_nameservers /etc/resolv.conf)
+  fi
+  if [ -z "$upstreams" ] && [ -r "$TAILNET_DNS_UPSTREAMS_FILE" ]; then
+    upstreams=$(awk 'NF { print }' "$TAILNET_DNS_UPSTREAMS_FILE")
+  fi
+  if [ -z "$upstreams" ]; then
+    upstreams=$(resolv_nameservers "$source_file")
+  fi
+
+  printf '%s\n' "$upstreams" | awk 'NF { print }'
+}
+
+save_tailnet_dns_original_state() {
+  mkdir -p /etc/hlwdot
+  chmod 0700 /etc/hlwdot
+
+  if [ -r /etc/resolv.conf ] && ! resolv_conf_hlwdot_managed; then
+    cp /etc/resolv.conf "$TAILNET_DNS_RESOLV_BACKUP"
+    chmod 0600 "$TAILNET_DNS_RESOLV_BACKUP"
+    resolv_nameservers /etc/resolv.conf >"$TAILNET_DNS_UPSTREAMS_FILE"
+    chmod 0600 "$TAILNET_DNS_UPSTREAMS_FILE"
+  fi
+}
+
+ensure_dnsmasq_include_dir() {
+  mkdir -p /etc/dnsmasq.d
+  touch /etc/dnsmasq.conf
+  if ! grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq[.]d' /etc/dnsmasq.conf; then
+    {
+      printf '\n'
+      printf '# HlwDot managed include directory.\n'
+      printf 'conf-dir=/etc/dnsmasq.d,*.conf\n'
+    } >>/etc/dnsmasq.conf
+  fi
+}
+
+write_tailnet_dnsmasq_conf() {
+  temp_file="${TMP_DIR}/${SCRIPT_NAME}.$$.dnsmasq"
+  domains=$(tailnet_dns_domains | awk '!seen[$0]++')
+  upstreams=$(tailnet_dns_upstreams | awk '!seen[$0]++')
+
+  [ -n "$domains" ] || die "无法确定 Headscale DNS 域，请设置 ALPINE_TAILNET_DNS_DOMAINS。"
+  [ -n "$upstreams" ] || die "无法保留原 DNS 上游，请设置 ALPINE_TAILNET_DNS_UPSTREAMS。"
+
+  printf '%s\n' "$domains" | while IFS= read -r domain; do
+    valid_dns_domain "$domain" || die "DNS 域名格式错误：$domain"
+  done
+  printf '%s\n' "$upstreams" | while IFS= read -r upstream; do
+    valid_dns_upstream "$upstream" || die "DNS 上游格式错误：$upstream"
+  done
+
+  {
+    printf '# HlwDot tailnet DNS resolver. Generated by alpine-hollow-client.sh.\n'
+    printf 'no-resolv\n'
+    printf 'listen-address=127.0.0.1\n'
+    printf 'bind-interfaces\n'
+    printf 'local-service=host\n'
+    printf 'cache-size=1000\n'
+    printf '\n'
+    printf '%s\n' "$upstreams" | while IFS= read -r upstream; do
+      [ -n "$upstream" ] && printf 'server=%s\n' "$upstream"
+    done
+    printf '\n'
+    printf '%s\n' "$domains" | while IFS= read -r domain; do
+      [ -n "$domain" ] && printf 'server=/%s/100.100.100.100\n' "$domain"
+    done
+  } >"$temp_file"
+
+  cat "$temp_file" >"$TAILNET_DNSMASQ_CONF"
+  chmod 0644 "$TAILNET_DNSMASQ_CONF"
+}
+
+write_tailnet_resolv_conf() {
+  temp_file="${TMP_DIR}/${SCRIPT_NAME}.$$.resolv"
+  search_domains=$(
+    {
+      tailnet_dns_domains
+      resolv_search_domains
+    } | awk 'NF && !seen[$0]++ { print }'
+  )
+
+  {
+    printf '# HlwDot tailnet DNS resolver. Generated by alpine-hollow-client.sh.\n'
+    if [ -n "$search_domains" ]; then
+      printf 'search'
+      printf '%s\n' "$search_domains" | while IFS= read -r domain; do
+        [ -n "$domain" ] && printf ' %s' "$domain"
+      done
+      printf '\n'
+    fi
+    printf 'nameserver 127.0.0.1\n'
+  } >"$temp_file"
+
+  cat "$temp_file" >/etc/resolv.conf
+  chmod 0644 /etc/resolv.conf
+}
+
+start_dnsmasq_service() {
+  command_exists dnsmasq || die "缺少 dnsmasq。"
+  dnsmasq --test >/dev/null
+  rc-update add dnsmasq default >/dev/null
+  if rc-service dnsmasq status >/dev/null 2>&1; then
+    rc-service dnsmasq restart
+  else
+    rc-service dnsmasq start
+  fi
+}
+
+tailnet_dns_probe_name() {
+  domains=$(tailnet_dns_domains | awk 'NF { printf "%s%s", sep, $0; sep = "|" }')
+  [ -n "$domains" ] || return 1
+  tailscale status 2>/dev/null |
+    awk -v domains="$domains" '
+      BEGIN { n = split(domains, d, "|") }
+      /^[0-9]/ {
+        for (i = 1; i <= n; i++) {
+          suffix = "." d[i]
+          if ($2 == d[i] || substr($2, length($2) - length(suffix) + 1) == suffix) {
+            print $2
+            exit
+          }
+        }
+      }
+    '
+}
+
+verify_tailnet_dns_proxy() {
+  rc-service dnsmasq status >/dev/null 2>&1 || die "dnsmasq 未运行。"
+  grep -Eq '^[[:space:]]*nameserver[[:space:]]+127[.]0[.]0[.]1([[:space:]]|$)' /etc/resolv.conf || die "/etc/resolv.conf 未指向本地 dnsmasq。"
+  nslookup github.com 127.0.0.1 >/dev/null 2>&1 || die "本地 dnsmasq 无法转发普通公网 DNS。"
+
+  probe=$(tailnet_dns_probe_name || true)
+  if [ -n "$probe" ]; then
+    nslookup "$probe" 127.0.0.1 2>/dev/null | grep -Eq 'Address:[[:space:]]+100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' ||
+      die "本地 dnsmasq 无法解析 Headscale DNS：$probe"
+    getent hosts "$probe" >/dev/null 2>&1 || die "系统 resolver 无法解析 Headscale DNS：$probe"
+  else
+    warn "未找到可用于验证的 Headscale DNS peer，已跳过内网域名解析验证。"
+  fi
+
+  log "本地 DNS 分流验证通过。"
+}
+
+configure_tailnet_dns_proxy() {
+  if ! tailnet_dns_needed; then
+    return 0
+  fi
+
+  save_tailnet_dns_original_state
+  ensure_dnsmasq_include_dir
+  write_tailnet_dnsmasq_conf
+  start_dnsmasq_service
+  write_tailnet_resolv_conf
+  verify_tailnet_dns_proxy
 }
 
 resolve_public_iface() {
@@ -951,6 +1212,12 @@ verify_reboot_persistence() {
       die "local 服务未加入 default 运行级别，主机重启后分流规则不会自动恢复。"
     fi
   fi
+
+  if tailnet_dns_needed; then
+    if ! rc-update show default 2>/dev/null | awk '$1 == "dnsmasq" { found = 1 } END { exit found ? 0 : 1 }'; then
+      die "dnsmasq 未加入 default 运行级别，主机重启后本地 DNS 分流不会自动恢复。"
+    fi
+  fi
 }
 
 persist_tailnet_state() {
@@ -971,6 +1238,9 @@ print_summary() {
   fi
   if [ "$ALPINE_SPLIT_DIRECTION" != none ]; then
     printf '  分流方向：%s\n' "$ALPINE_SPLIT_DIRECTION"
+  fi
+  if tailnet_dns_needed; then
+    printf '  DNS：本地 dnsmasq 分流，默认保留原上游，Headscale 域走 100.100.100.100。\n'
   fi
 }
 
@@ -1007,6 +1277,7 @@ main() {
   maybe_disable_tailscale_dns_fight
   run_tailscale_up
   verify_tailnet_ready
+  configure_tailnet_dns_proxy
   verify_reboot_persistence
   persist_tailnet_state
   print_summary
