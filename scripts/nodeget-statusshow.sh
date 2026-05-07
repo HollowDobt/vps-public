@@ -22,6 +22,7 @@ DIST_DIR="${APP_ROOT}/current"
 CONFIG_DIR="/etc/hlwdot/nodeget-statusshow"
 NODEGET_CONF="/etc/nodeget-server.conf"
 NODEGET_CREDENTIALS="${CONFIG_DIR}/nodeget-server.credentials"
+NODEGET_SERVER_UUID_FILE="${CONFIG_DIR}/server.uuid"
 CADDYFILE="${CONFIG_DIR}/Caddyfile"
 HOLLOW_JSON="${STATE_DIR}/hollow-nodes.json"
 HOLLOW_SYNC_SCRIPT="/usr/local/lib/hlwdot/nodeget-hollow-sync.sh"
@@ -636,6 +637,7 @@ ensure_users() {
 
 write_nodeget_config() {
   tmp="${TMP_DIR}/${SCRIPT_NAME}.$$.nodeget-server.conf"
+  server_uuid=$(nodeget_server_uuid_value)
   cat >"$tmp" <<EOF
 log_level = "warn"
 ws_listener = "$(toml_string "$NODEGET_SERVER_LISTEN")"
@@ -643,7 +645,7 @@ jsonrpc_max_connections = ${NODEGET_JSONRPC_MAX_CONNECTIONS}
 jsonrpc_timing_log_level = "warn"
 enable_unix_socket = false
 unix_socket_path = "/var/lib/nodeget-server/nodeget-server.sock"
-server_uuid = "$(toml_string "$NODEGET_SERVER_UUID")"
+server_uuid = "$(toml_string "$server_uuid")"
 
 [database]
 database_url = "$(toml_string "$NODEGET_DATABASE_URL")"
@@ -655,6 +657,36 @@ max_lifetime_ms = 30000
 max_connections = 5
 EOF
   install -m 0640 -o root -g nodeget "$tmp" "$NODEGET_CONF"
+}
+
+nodeget_server_uuid_value() {
+  if [ "$NODEGET_SERVER_UUID" != auto_gen ]; then
+    printf '%s\n' "$NODEGET_SERVER_UUID"
+    return 0
+  fi
+  if [ -r "$NODEGET_SERVER_UUID_FILE" ]; then
+    awk 'NF { print; exit }' "$NODEGET_SERVER_UUID_FILE"
+    return 0
+  fi
+  if [ -r "$NODEGET_CONF" ]; then
+    existing=$(sed -n 's/^[[:space:]]*server_uuid[[:space:]]*=[[:space:]]*["'\'']\([^"'\'']*\)["'\''].*/\1/p' "$NODEGET_CONF" | awk 'NF && $0 != "auto_gen" { print; exit }')
+    if [ -n "${existing:-}" ]; then
+      printf '%s\n' "$existing" >"$NODEGET_SERVER_UUID_FILE"
+      chmod 0600 "$NODEGET_SERVER_UUID_FILE"
+      printf '%s\n' "$existing"
+      return 0
+    fi
+  fi
+  if command_exists uuidgen; then
+    generated=$(uuidgen | tr '[:upper:]' '[:lower:]')
+  elif [ -r /proc/sys/kernel/random/uuid ]; then
+    generated=$(cat /proc/sys/kernel/random/uuid)
+  else
+    die "无法生成 NodeGet server_uuid。"
+  fi
+  printf '%s\n' "$generated" >"$NODEGET_SERVER_UUID_FILE"
+  chmod 0600 "$NODEGET_SERVER_UUID_FILE"
+  printf '%s\n' "$generated"
 }
 
 write_nodeget_service() {
