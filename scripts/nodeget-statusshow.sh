@@ -181,8 +181,11 @@ validate_bool() {
 }
 
 setup_state_dir() {
+  mkdir -p /etc/hlwdot /opt/hlwdot /var/lib/hlwdot
   mkdir -p "$TMP_DIR" "$APP_ROOT" "$CONFIG_DIR" /usr/local/lib/hlwdot
-  chmod 0755 "$STATE_DIR" "$APP_ROOT" "$CONFIG_DIR" /usr/local/lib/hlwdot
+  chmod 0711 /etc/hlwdot /opt/hlwdot /var/lib/hlwdot
+  chmod 0755 "$STATE_DIR" "$APP_ROOT" /usr/local/lib/hlwdot
+  chmod 0750 "$CONFIG_DIR"
   chmod 0700 "$TMP_DIR"
 }
 
@@ -658,6 +661,8 @@ ensure_users() {
   mkdir -p /var/lib/nodeget-server "$STATE_DIR"
   chown -R nodeget:nodeget /var/lib/nodeget-server
   chmod 0750 /var/lib/nodeget-server
+  chown root:caddy "$CONFIG_DIR"
+  chmod 0750 "$CONFIG_DIR"
   chown -R caddy:caddy "$APP_ROOT" 2>/dev/null || true
 }
 
@@ -1319,7 +1324,8 @@ http://${NODEGET_STATUS_LISTEN} {
   }
 }
 EOF
-  chmod 0644 "$CADDYFILE"
+  chown root:caddy "$CADDYFILE"
+  chmod 0640 "$CADDYFILE"
   caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null
   log "Caddy 本地入口：127.0.0.1:${port}"
 }
@@ -1577,11 +1583,53 @@ verify_local_only_listener() {
   done
 }
 
+listener_has_exact() {
+  listen_addr="$1"
+  listen_port="$2"
+  awk -v a="${listen_addr}:${listen_port}" '$4 == a { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+wait_for_listener() {
+  listen_addr="$1"
+  listen_port="$2"
+  label="$3"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    ss -ltn 2>/dev/null | listener_has_exact "$listen_addr" "$listen_port" && return 0
+    i=$((i + 1))
+    sleep 1
+  done
+  die "${label} 未监听 ${listen_addr}:${listen_port}。"
+}
+
+wait_for_tailnet_listener() {
+  listen_port="$1"
+  listen_addr="$2"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    ss -ltn 2>/dev/null | tailnet_listener_has_expected "$listen_port" "$listen_addr" && return 0
+    i=$((i + 1))
+    sleep 1
+  done
+  die "NodeGet Agent 入口未监听 ${listen_addr}:${listen_port}。"
+}
+
+wait_for_http() {
+  url="$1"
+  label="$2"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    curl -fsS --connect-timeout 5 "$url" >/dev/null 2>&1 && return 0
+    i=$((i + 1))
+    sleep 1
+  done
+  die "${label} 不可读。"
+}
+
 verify_nodeget_server_listener() {
   server_port=$(nodeget_server_port)
   command_exists ss || return 0
-  ss -ltn 2>/dev/null | awk -v p=":$server_port" '$4 ~ "^127[.]0[.]0[.]1" p "$" { found = 1 } END { exit found ? 0 : 1 }' ||
-    die "NodeGet Server 未监听 127.0.0.1:${server_port}。"
+  wait_for_listener 127.0.0.1 "$server_port" "NodeGet Server"
 
   allowed_tailnet=''
   if { [ "$NODEGET_AGENT_INGRESS_ENABLE" = 1 ] || [ "$NODEGET_AGENT_INGRESS_ENABLE" = true ]; } &&
@@ -1619,8 +1667,7 @@ verify_tailnet_only_listener() {
   port="$1"
   listen_addr="$2"
   command_exists ss || return 0
-  ss -ltn 2>/dev/null | tailnet_listener_has_expected "$port" "$listen_addr" ||
-    die "NodeGet Agent 入口未监听 ${listen_addr}:${port}。"
+  wait_for_tailnet_listener "$port" "$listen_addr"
   bad=$(ss -ltn 2>/dev/null | tailnet_listener_bad_lines "$port" "$listen_addr" || true)
   [ -z "$bad" ] || die "检测到 NodeGet Agent 入口监听在非 hollow-net 地址：$bad"
 }
@@ -1640,8 +1687,8 @@ verify_services() {
   if [ "$NODEGET_CLOUDFLARED_ENABLE" = 1 ] || [ "$NODEGET_CLOUDFLARED_ENABLE" = true ]; then
     rc-service "$NODEGET_CLOUDFLARED_SERVICE" status >/dev/null 2>&1 || die "Cloudflare Tunnel 未运行。"
   fi
-  curl -fsS --connect-timeout 5 "http://${NODEGET_STATUS_LISTEN}/config.json" >/dev/null || die "本地 StatusShow 配置不可读。"
-  curl -fsS --connect-timeout 5 "http://${NODEGET_STATUS_LISTEN}/hollow-nodes.json" >/dev/null || die "hollow-net inventory 不可读。"
+  wait_for_http "http://${NODEGET_STATUS_LISTEN}/config.json" "本地 StatusShow 配置"
+  wait_for_http "http://${NODEGET_STATUS_LISTEN}/hollow-nodes.json" "hollow-net inventory"
 }
 
 self_test_require_base() {
