@@ -86,6 +86,7 @@ usage() {
   ALPINE_SPLIT_INBOUND_FORWARDS=443/tcp=100.64.0.2:443
   HEADSCALE_ENDPOINT_CHECK=1
   HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC=15
+  HEADSCALE_AUTO_DISABLE_DNS_FIGHT=1
   ALPINE_TAILSCALE_UP_TIMEOUT_SEC=120
 
 说明：
@@ -121,14 +122,12 @@ shell_quote() {
   printf "'"
 }
 
-persist_env_value() {
-  key="$1"
-  value="$2"
-  target="/etc/hlwdot/vps.env"
+persist_env_value_to_file() {
+  target="$1"
+  key="$2"
+  value="$3"
   temp_file="${TMP_DIR}/${SCRIPT_NAME}.$$.$key"
 
-  mkdir -p /etc/hlwdot
-  chmod 0700 /etc/hlwdot
   [ -e "$target" ] || : >"$target"
   chmod 0600 "$target"
 
@@ -136,6 +135,22 @@ persist_env_value() {
   printf '%s=%s\n' "$key" "$(shell_quote "$value")" >>"$temp_file"
   cat "$temp_file" >"$target"
   chmod 0600 "$target"
+}
+
+persist_env_value() {
+  key="$1"
+  value="$2"
+  target="/etc/hlwdot/vps.env"
+  local_env="${SCRIPT_DIR}/.env"
+
+  mkdir -p /etc/hlwdot
+  chmod 0700 /etc/hlwdot
+
+  persist_env_value_to_file "$target" "$key" "$value"
+  if [ -e "$local_env" ] && [ "$local_env" != "$target" ]; then
+    persist_env_value_to_file "$local_env" "$key" "$value"
+  fi
+
   log "更新系统配置：$key"
 }
 
@@ -167,6 +182,7 @@ validate_input() {
   validate_bool HEADSCALE_ENABLE_TS_SSH "$HEADSCALE_ENABLE_TS_SSH"
   validate_bool HEADSCALE_RESET "$HEADSCALE_RESET"
   validate_bool HEADSCALE_ENDPOINT_CHECK "$HEADSCALE_ENDPOINT_CHECK"
+  validate_bool HEADSCALE_AUTO_DISABLE_DNS_FIGHT "$HEADSCALE_AUTO_DISABLE_DNS_FIGHT"
   validate_bool ALPINE_ENABLE_COMMUNITY_REPO "$ALPINE_ENABLE_COMMUNITY_REPO"
   validate_bool ALPINE_ALLOW_INTERACTIVE_LOGIN "$ALPINE_ALLOW_INTERACTIVE_LOGIN"
   validate_bool ALPINE_KILL_STALE_TAILSCALE_UP "$ALPINE_KILL_STALE_TAILSCALE_UP"
@@ -205,6 +221,7 @@ apply_defaults() {
   HEADSCALE_EXTRA_UP_ARGS="${HEADSCALE_EXTRA_UP_ARGS:-}"
   HEADSCALE_ENDPOINT_CHECK="${HEADSCALE_ENDPOINT_CHECK:-1}"
   HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC="${HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC:-15}"
+  HEADSCALE_AUTO_DISABLE_DNS_FIGHT="${HEADSCALE_AUTO_DISABLE_DNS_FIGHT:-1}"
   HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
   ALPINE_TAILSCALE_INSTALL_SOURCE="${ALPINE_TAILSCALE_INSTALL_SOURCE:-auto}"
   ALPINE_TAILSCALE_MIN_VERSION="${ALPINE_TAILSCALE_MIN_VERSION:-1.74.0}"
@@ -690,6 +707,45 @@ tailnet_already_up() {
   [ -n "$(tailscale ip -4 2>/dev/null | awk 'NF { print; exit }')" ]
 }
 
+tailscale_current_accept_dns() {
+  command_exists tailscale || return 1
+  tailscale debug prefs 2>/dev/null |
+    awk -F: '/"CorpDNS"/ { gsub(/[ ,]/, "", $2); print $2; exit }'
+}
+
+sync_tailscale_accept_dns() {
+  command_exists tailscale || return 1
+  tailscale set "--accept-dns=${HEADSCALE_ACCEPT_DNS}"
+}
+
+tailscale_dns_fight_reported() {
+  command_exists tailscale || return 1
+  tailscale status 2>/dev/null |
+    grep -Eq 'dns-fight|System DNS config not ideal|/etc/resolv[.]conf overwritten'
+}
+
+resolv_conf_lxd_managed() {
+  [ -r /etc/resolv.conf ] || return 1
+  [ ! -L /etc/resolv.conf ] || return 1
+  grep -Eq '(^search[[:space:]].*([[:space:]]|^)lxd([[:space:]]|$)|^nameserver[[:space:]]+10[.]45[.]153[.]1$)' /etc/resolv.conf
+}
+
+maybe_disable_tailscale_dns_fight() {
+  [ "$HEADSCALE_AUTO_DISABLE_DNS_FIGHT" = 1 ] || return 0
+  [ "$HEADSCALE_ACCEPT_DNS" = true ] || return 0
+
+  if tailscale_dns_fight_reported; then
+    warn "检测到 Tailscale DNS fight，将关闭系统 DNS 接管。"
+  elif resolv_conf_lxd_managed; then
+    warn "检测到 LXD 管理的 /etc/resolv.conf，将关闭系统 DNS 接管。"
+  else
+    return 0
+  fi
+
+  HEADSCALE_ACCEPT_DNS=false
+  persist_env_value HEADSCALE_ACCEPT_DNS "$HEADSCALE_ACCEPT_DNS"
+}
+
 url_host() {
   value="$1"
   value=${value#*://}
@@ -820,17 +876,31 @@ run_with_timeout() {
 
 run_tailscale_up() {
   exit_code=0
+  already_up=0
+  current_accept_dns=''
 
-  if [ "$HEADSCALE_RESET" != 1 ] && tailnet_already_up; then
-    log "当前节点已接入 Headscale 网络。"
+  if tailnet_already_up; then
+    already_up=1
+  fi
+
+  if [ "$HEADSCALE_RESET" != 1 ] && [ "$already_up" = 1 ]; then
+    current_accept_dns=$(tailscale_current_accept_dns || true)
+    if [ "$current_accept_dns" = "$HEADSCALE_ACCEPT_DNS" ]; then
+      log "当前节点已接入 Headscale 网络。"
+      return 0
+    fi
+    log "当前节点已接入 Headscale 网络，正在同步 DNS 接管偏好。"
+    sync_tailscale_accept_dns
     return 0
   fi
-  if [ -z "$HEADSCALE_AUTHKEY" ] && [ "$ALPINE_ALLOW_INTERACTIVE_LOGIN" != 1 ]; then
+  if [ -z "$HEADSCALE_AUTHKEY" ] && [ "$already_up" != 1 ] && [ "$ALPINE_ALLOW_INTERACTIVE_LOGIN" != 1 ]; then
     die "请填写 HEADSCALE_AUTHKEY；需要手动网页登录时设置 ALPINE_ALLOW_INTERACTIVE_LOGIN=1。"
   fi
 
   set -- up --login-server "$HEADSCALE_SERVER_URL" "--accept-dns=${HEADSCALE_ACCEPT_DNS}" "--timeout=${ALPINE_TAILSCALE_UP_TIMEOUT_SEC}s"
-  [ -n "$HEADSCALE_AUTHKEY" ] && set -- "$@" --auth-key "$HEADSCALE_AUTHKEY"
+  if [ -n "$HEADSCALE_AUTHKEY" ] && { [ "$already_up" != 1 ] || [ "$HEADSCALE_RESET" = 1 ]; }; then
+    set -- "$@" --auth-key "$HEADSCALE_AUTHKEY"
+  fi
   [ -n "$HEADSCALE_CLIENT_HOSTNAME" ] && set -- "$@" --hostname "$HEADSCALE_CLIENT_HOSTNAME"
   if [ -n "$HEADSCALE_ADVERTISE_ROUTES" ]; then
     set -- "$@" --advertise-routes "$HEADSCALE_ADVERTISE_ROUTES"
@@ -934,6 +1004,7 @@ main() {
   wait_tailscaled_socket
   configure_forwarding_if_needed
   write_split_rules_script
+  maybe_disable_tailscale_dns_fight
   run_tailscale_up
   verify_tailnet_ready
   verify_reboot_persistence
