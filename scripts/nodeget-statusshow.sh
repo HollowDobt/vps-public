@@ -1376,12 +1376,13 @@ build_tunnel_config_body() {
 
   jq --arg host "$host" --arg service "$service" '
     (.result.config // {}) as $config |
+    (($config.ingress // []) | map(select((.hostname // "") != $host))) as $without_host |
+    ($without_host | map(select((has("hostname") or has("path"))))) as $rules |
+    ($without_host | map(select((has("hostname") | not) and (has("path") | not))) | last // {service: "http_status:404"}) as $catch_all |
     {
       config: (
         $config |
-        .ingress = (((.ingress // []) | map(select((.hostname // "") != $host))) + [
-          { hostname: $host, service: $service }
-        ])
+        .ingress = ($rules + [{hostname: $host, service: $service}] + [$catch_all])
       )
     }
   ' "$current_file" >"$output_file"
@@ -1714,7 +1715,8 @@ self_test_cloudflare_config_body() {
       "originRequest": {"connectTimeout": 10},
       "ingress": [
         {"hostname": "old.example.com", "service": "http://127.0.0.1:9000"},
-        {"hostname": "nodeget.example.com", "service": "http://127.0.0.1:1111"}
+        {"hostname": "nodeget.example.com", "service": "http://127.0.0.1:1111"},
+        {"service": "http_status:404"}
       ]
     }
   }
@@ -1725,7 +1727,9 @@ EOF
     .config.originRequest.connectTimeout == 10 and
     ([.config.ingress[] | select(.hostname == "old.example.com")] | length) == 1 and
     ([.config.ingress[] | select(.hostname == "nodeget.example.com" and .service == "http://127.0.0.1:8221")] | length) == 1 and
-    ([.config.ingress[] | select(.hostname == "nodeget.example.com")] | length) == 1
+    ([.config.ingress[] | select(.hostname == "nodeget.example.com")] | length) == 1 and
+    (.config.ingress[-1].service == "http_status:404") and
+    (.config.ingress[-1].hostname == null)
   ' "$desired" >/dev/null || die "Cloudflare Tunnel 配置合成自检失败。"
   log "自检通过：Cloudflare Tunnel 配置合成。"
 }
