@@ -1294,7 +1294,7 @@ write_caddy_config() {
   auto_https off
 }
 
-http://${NODEGET_STATUS_LISTEN} {
+http://:${port} {
   bind 127.0.0.1
   encode zstd gzip
 
