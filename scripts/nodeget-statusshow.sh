@@ -401,6 +401,7 @@ apply_defaults() {
   NODEGET_STATUSSHOW_VITE_VERSION="${NODEGET_STATUSSHOW_VITE_VERSION:-6.3.5}"
   NODEGET_STATUSSHOW_REACT_PLUGIN_VERSION="${NODEGET_STATUSSHOW_REACT_PLUGIN_VERSION:-4.7.0}"
   NODEGET_STATUSSHOW_TYPES_NODE_VERSION="${NODEGET_STATUSSHOW_TYPES_NODE_VERSION:-20.19.25}"
+  NODEGET_STATUSSHOW_MINIFY="${NODEGET_STATUSSHOW_MINIFY:-0}"
 
   NODEGET_STATUS_HOSTNAME="${NODEGET_STATUS_HOSTNAME:-nodeget.hlwdot.com}"
   NODEGET_STATUS_SITE_NAME="${NODEGET_STATUS_SITE_NAME:-Hollow Net Status}"
@@ -453,6 +454,7 @@ validate_input() {
   validate_bool NODEGET_CLOUDFLARED_ENABLE "$NODEGET_CLOUDFLARED_ENABLE"
   validate_bool NODEGET_HOLLOW_PUBLISH_IP "$NODEGET_HOLLOW_PUBLISH_IP"
   validate_bool NODEGET_AGENT_INGRESS_ENABLE "$NODEGET_AGENT_INGRESS_ENABLE"
+  validate_bool NODEGET_STATUSSHOW_MINIFY "$NODEGET_STATUSSHOW_MINIFY"
   case "$NODEGET_TUNNEL_CONFIG_ENABLE" in
     auto|0|1|true|false) ;;
     *) die "NODEGET_TUNNEL_CONFIG_ENABLE 只能是 auto/0/1/true/false。" ;;
@@ -1025,7 +1027,11 @@ build_statusshow() {
   (
     cd "$SRC_DIR"
     npm ci --no-audit --no-fund --cache "$npm_cache"
-    npm run build
+    if [ "$NODEGET_STATUSSHOW_MINIFY" = 1 ] || [ "$NODEGET_STATUSSHOW_MINIFY" = true ]; then
+      npm run build
+    else
+      npm run build -- --minify=false
+    fi
   )
   rm -rf "$npm_cache"
   rm -rf "${DIST_DIR}.new"
@@ -1638,7 +1644,11 @@ self_test_frontend_build() {
     cd "$SRC_DIR"
     npm ci --no-audit --no-fund --cache "$npm_cache"
     npm run typecheck
-    npm run build
+    if [ "$NODEGET_STATUSSHOW_MINIFY" = 1 ] || [ "$NODEGET_STATUSSHOW_MINIFY" = true ]; then
+      npm run build
+    else
+      npm run build -- --minify=false
+    fi
   )
   rm -rf "$npm_cache"
   [ -s "${SRC_DIR}/dist/index.html" ] || die "自检构建失败：缺少 dist/index.html"
