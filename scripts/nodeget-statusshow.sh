@@ -57,6 +57,7 @@ usage() {
   cat <<EOF
 用法：
   sh $SCRIPT_NAME
+  sh $SCRIPT_NAME --merge-env
   sh $SCRIPT_NAME --self-test
   sh $SCRIPT_NAME --self-test-build
 
@@ -200,6 +201,121 @@ cleanup_self_test_root() {
       [ -d "$SELF_TEST_ROOT" ] && rm -rf "$SELF_TEST_ROOT"
       ;;
   esac
+}
+
+merge_nodeget_env_files() {
+  old_env="$1"
+  example_env="$2"
+  li_env="$3"
+  account_id="${4:-}"
+  dir=$(CDPATH= cd -- "$(dirname -- "$old_env")" && pwd)
+  base=$(basename "$old_env")
+  tmp="${dir}/${base}.merge.$$"
+  backup="${dir}/${base}.pre-nodeget-merge.$$"
+  block="${dir}/${base}.nodeget-block.$$"
+  overrides="${dir}/${base}.nodeget-overrides.$$"
+
+  cleanup_merge() {
+    rm -f "$tmp" "$block" "$overrides"
+    if [ -f "$backup" ]; then
+      cp -p "$backup" "$old_env"
+      rm -f "$backup"
+    fi
+  }
+
+  [ -f "$old_env" ] || die "找不到旧 .env：$old_env"
+  [ -f "$example_env" ] || die "找不到 .env.example：$example_env"
+  [ -f "$li_env" ] || die "找不到 .env-li：$li_env"
+
+  cp -p "$old_env" "$backup"
+  chmod 0600 "$li_env"
+  awk '
+    /^# NodeGet hollow-net 探针页。/ { keep = 1 }
+    keep {
+      if (/^# k3s 主节点。/) exit
+      print
+    }
+  ' "$example_env" >"$block"
+  [ -s "$block" ] || {
+    cleanup_merge
+    die ".env.example 缺少 NodeGet 配置段。"
+  }
+
+  awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ && $1 ~ /^NODEGET_/ { print }' "$li_env" >"$overrides"
+  grep -q '^NODEGET_TUNNEL_NAME=' "$overrides" || printf 'NODEGET_TUNNEL_NAME=healthy-page\n' >>"$overrides"
+  if [ -n "$account_id" ] && ! grep -q '^NODEGET_CLOUDFLARE_ACCOUNT_ID=' "$overrides"; then
+    printf 'NODEGET_CLOUDFLARE_ACCOUNT_ID=%s\n' "$account_id" >>"$overrides"
+  fi
+
+  {
+    awk '
+      /^# NodeGet hollow-net 探针页。/ { skip = 1; next }
+      skip && /^# k3s 主节点。/ { skip = 0; print; next }
+      skip { next }
+      /^NODEGET_/ { next }
+      { print }
+    ' "$old_env"
+    printf '\n'
+    awk -F= '
+      FNR == NR {
+        if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/) {
+          key = $1
+          line[key] = $0
+          order[++n] = key
+        }
+        next
+      }
+      /^[A-Za-z_][A-Za-z0-9_]*=/ && $1 ~ /^NODEGET_/ {
+        key = $1
+        if (key in line) {
+          print line[key]
+          used[key] = 1
+          next
+        }
+      }
+      { print }
+      END {
+        for (i = 1; i <= n; i++) {
+          key = order[i]
+          if (!(key in used)) print line[key]
+        }
+      }
+    ' "$overrides" "$block"
+  } >"$tmp"
+  chmod 0600 "$tmp"
+
+  if ! sh -c '
+    set -eu
+    set -a
+    . "$1"
+    set +a
+    : "${NODEGET_STATUS_HOSTNAME:?}"
+    : "${NODEGET_CLOUDFLARED_TOKEN:?}"
+    : "${NODEGET_VISITOR_TOKEN:?}"
+    : "${NODEGET_DNS_CONFIG_TOKEN:?}"
+    [ "${NODEGET_TUNNEL_NAME:-}" = healthy-page ]
+    case "${NODEGET_SERVER_LISTEN:-127.0.0.1:2211}" in
+      127.0.0.1:*|localhost:*) ;;
+      *) exit 11 ;;
+    esac
+    case "${NODEGET_STATUS_LISTEN:-127.0.0.1:8221}" in
+      127.0.0.1:*|localhost:*) ;;
+      *) exit 12 ;;
+    esac
+    [ "${NODEGET_AGENT_LISTEN_ADDR:-auto}" != 0.0.0.0 ]
+  ' sh "$tmp"; then
+    cleanup_merge
+    die ".env 合并后校验失败，已恢复旧 .env。"
+  fi
+
+  mv "$tmp" "$old_env"
+  rm -f "$block" "$overrides" "$backup"
+}
+
+merge_env() {
+  account_id="${NODEGET_CLOUDFLARE_ACCOUNT_ID:-${CLOUDFLARE_ACCOUNT_ID:-c23c771ead9657dab9308b8601bd02d9}}"
+  merge_nodeget_env_files "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.example" "${SCRIPT_DIR}/.env-li" "$account_id"
+  log ".env 已合并 NodeGet 配置；.env-li 权限已收紧。"
 }
 
 on_exit() {
@@ -1591,6 +1707,55 @@ EOF
   log "自检通过：Cloudflare Tunnel 配置合成。"
 }
 
+self_test_env_merge() {
+  old_env="${TMP_DIR}/old.env"
+  example_env="${TMP_DIR}/example.env"
+  li_env="${TMP_DIR}/li.env"
+  cat >"$old_env" <<'EOF'
+FOO=bar
+NODEGET_STATUS_HOSTNAME=old.example.com
+# k3s 主节点。
+K3S_VERSION=
+EOF
+  cat >"$example_env" <<'EOF'
+# top
+# NodeGet hollow-net 探针页。
+NODEGET_STATUS_HOSTNAME=nodeget.hlwdot.com
+NODEGET_STATUS_SITE_NAME='Hollow Net Status'
+NODEGET_STATUS_FOOTER='Powered by NodeGet'
+NODEGET_VISITOR_TOKEN=
+NODEGET_CLOUDFLARED_TOKEN=
+NODEGET_DNS_CONFIG_TOKEN=
+NODEGET_SERVER_LISTEN=127.0.0.1:2211
+NODEGET_STATUS_LISTEN=127.0.0.1:8221
+NODEGET_AGENT_LISTEN_ADDR=auto
+NODEGET_TUNNEL_NAME=healthy-page
+NODEGET_CLOUDFLARE_ACCOUNT_ID=
+# k3s 主节点。
+K3S_VERSION=
+EOF
+  cat >"$li_env" <<'EOF'
+NODEGET_STATUS_HOSTNAME=nodeget.example.com
+NODEGET_CLOUDFLARED_TOKEN='run-token'
+NODEGET_VISITOR_TOKEN='visitor-token'
+NODEGET_DNS_CONFIG_TOKEN='config-token'
+EOF
+  chmod 0644 "$li_env"
+  merge_nodeget_env_files "$old_env" "$example_env" "$li_env" c23c771ead9657dab9308b8601bd02d9
+  [ "$(stat -f %Lp "$li_env" 2>/dev/null || stat -c %a "$li_env")" = 600 ] || die ".env-li 权限合并自检失败。"
+  sh -c '
+    set -eu
+    . "$1"
+    [ "$FOO" = bar ]
+    [ "$NODEGET_STATUS_HOSTNAME" = nodeget.example.com ]
+    [ "$NODEGET_STATUS_SITE_NAME" = "Hollow Net Status" ]
+    [ "$NODEGET_CLOUDFLARE_ACCOUNT_ID" = c23c771ead9657dab9308b8601bd02d9 ]
+    [ "$K3S_VERSION" = "" ]
+  ' sh "$old_env" || die ".env 合并自检失败。"
+  [ "$(grep -c '^NODEGET_STATUS_HOSTNAME=' "$old_env")" = 1 ] || die ".env 合并自检失败：重复 NODEGET_STATUS_HOSTNAME。"
+  log "自检通过：.env NodeGet 合并。"
+}
+
 self_test_common_setup() {
   self_root=$(mktemp -d "${TMPDIR:-/tmp}/nodeget-statusshow-selftest-state.XXXXXX")
   SELF_TEST_ROOT="$self_root"
@@ -1616,6 +1781,7 @@ self_test() {
   self_test_security_static
   self_test_listener_filters
   self_test_cloudflare_config_body
+  self_test_env_merge
   rm -rf "$self_root"
   SELF_TEST_ROOT=''
   log "基础自检通过；前端魔改构建请单独执行 --self-test-build。"
@@ -1630,6 +1796,7 @@ self_test_build() {
   self_test_security_static
   self_test_listener_filters
   self_test_cloudflare_config_body
+  self_test_env_merge
   self_test_frontend_build
   rm -rf "$self_root"
   SELF_TEST_ROOT=''
@@ -1661,6 +1828,10 @@ main() {
       ;;
     --self-test-build)
       self_test_build
+      exit 0
+      ;;
+    --merge-env)
+      merge_env
       exit 0
       ;;
     '')
