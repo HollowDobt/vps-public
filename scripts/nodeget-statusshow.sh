@@ -1919,7 +1919,8 @@ EOF
   NODEGET_DEFAULT_TUNNEL_ID=52a24e2a-82dc-45b0-ab30-bef831425dfd
   NODEGET_DEFAULT_ZONE_ID=8e60f95b7b37991976bb8db6df4ea2de
   merge_nodeget_env_files "$old_env" "$example_env" "$li_env" c23c771ead9657dab9308b8601bd02d9
-  [ "$(stat -f %Lp "$li_env" 2>/dev/null || stat -c %a "$li_env")" = 600 ] || die ".env-li 权限合并自检失败。"
+  li_env_mode=$(stat -c %a "$li_env" 2>/dev/null || stat -f %Lp "$li_env")
+  [ "$li_env_mode" = 600 ] || die ".env-li 权限合并自检失败。"
   sh -c '
     set -eu
     . "$1"
