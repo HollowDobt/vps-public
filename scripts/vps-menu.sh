@@ -25,12 +25,14 @@ MENU_LABELS=(
   "查看 k3s 节点 token"
   "Headscale 主节点备份"
   "k3s 主节点备份"
+  "部署 NodeGet hollow-net 探针页"
   "退出"
 )
 MENU_GROUPS=(
   "系统重装"
   "初始化配置"
   "初始化配置"
+  "并入集群配置"
   "并入集群配置"
   "并入集群配置"
   "并入集群配置"
@@ -59,10 +61,11 @@ MENU_HINTS=(
   "输出 worker 接入 token"
   "加密并上传 Headscale 状态"
   "加密并上传 k3s/Flux 状态"
+  "Alpine NAT LXC：NodeGet Server + 魔改 StatusShow + Cloudflare Tunnel"
   "返回 shell"
 )
-MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "0")
-MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-authkey" "headscale-client" "alpine-hollow-client" "k3s-main-node" "k3s-worker-full-node" "k3s-worker-node" "flux-gitops" "k3s-token" "backup-headscale" "backup-k3s" "exit")
+MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "f" "0")
+MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-authkey" "headscale-client" "alpine-hollow-client" "k3s-main-node" "k3s-worker-full-node" "k3s-worker-node" "flux-gitops" "k3s-token" "backup-headscale" "backup-k3s" "nodeget-statusshow" "exit")
 
 ITEM_LINES=()
 MENU_END_LINE=1
@@ -455,6 +458,15 @@ run_selected_action() {
         return 0
       }
       run_script "$(script_path vps-backup.sh)" k3s || true
+      pause_return
+      ;;
+    nodeget-statusshow)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_sh_script "$(script_path nodeget-statusshow.sh)" || true
       pause_return
       ;;
     exit)
