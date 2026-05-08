@@ -23,6 +23,7 @@ CONFIG_DIR="/etc/hlwdot/nodeget-statusshow"
 NODEGET_CONF="/etc/nodeget-server.conf"
 NODEGET_CREDENTIALS="${CONFIG_DIR}/nodeget-server.credentials"
 NODEGET_SERVER_UUID_FILE="${CONFIG_DIR}/server.uuid"
+NODEGET_POLLER_ENV="${CONFIG_DIR}/hollow-sync.env"
 CADDYFILE="${CONFIG_DIR}/Caddyfile"
 HOLLOW_JSON="${STATE_DIR}/hollow-nodes.json"
 HOLLOW_SYNC_SCRIPT="/usr/local/lib/hlwdot/nodeget-hollow-sync.sh"
@@ -67,7 +68,7 @@ usage() {
   NODEGET_STATUS_HOSTNAME=nodeget.example.com
   NODEGET_CLOUDFLARED_TOKEN=Cloudflare Tunnel token
 
-公开页读取 NodeGet 后端需要：
+本机采集 NodeGet 数据需要：
   NODEGET_VISITOR_TOKEN=key:secret 或 username|password
 
 说明：
@@ -887,7 +888,7 @@ patch_statusshow_source() {
 
   cat >"$hook_file" <<'EOF'
 import { useEffect, useState } from 'react'
-import type { Node } from '../types'
+import type { DynamicSummary, HistorySample, Node, NodeMeta, StaticData } from '../types'
 
 interface HollowInventory {
   nodes?: HollowInventoryNode[]
@@ -899,10 +900,16 @@ interface HollowInventoryNode {
   hostname?: string
   online?: boolean
   updated_at?: number
+  static?: StaticData
+  dynamic?: DynamicSummary | null
+  history?: HistorySample[]
+  meta?: Partial<NodeMeta>
 }
 
-const META = {
+const META: NodeMeta = {
+  name: '',
   region: '',
+  tags: [],
   hidden: false,
   virtualization: 'hollow-net',
   lat: null,
@@ -914,13 +921,33 @@ const META = {
   expireTime: '',
 }
 
+function tagsFor(row: HollowInventoryNode, hasAgent: boolean) {
+  const tags = new Set<string>(['hollow-net', hasAgent ? 'nodeget-agent' : 'pending-agent'])
+  for (const t of row.meta?.tags || []) {
+    if (t) tags.add(String(t))
+  }
+  return Array.from(tags)
+}
+
 function nodeFromInventory(row: HollowInventoryNode): Node | null {
   const host = String(row.hostname || '').trim()
-  const name = String(row.name || host).trim()
+  const name = String(row.name || row.meta?.name || host).trim()
   if (!host && !name) return null
   const id = String(row.id || host || name).trim()
   const uuid = `hollow:${id}`
-  const timestamp = Number(row.updated_at || Date.now())
+  const timestamp = Number(row.updated_at || row.dynamic?.timestamp || Date.now())
+  const hasAgent = Boolean(row.static || row.dynamic)
+  const staticData: StaticData = {
+    ...(row.static || {}),
+    uuid,
+    timestamp: row.static?.timestamp || timestamp,
+    system: {
+      ...(row.static?.system || {}),
+      system_host_name: row.static?.system?.system_host_name || host || name,
+      system_name: row.static?.system?.system_name || 'hollow-net',
+      virtualization: row.static?.system?.virtualization || row.meta?.virtualization || 'hollow-net',
+    },
+  }
 
   return {
     uuid,
@@ -928,20 +955,14 @@ function nodeFromInventory(row: HollowInventoryNode): Node | null {
     online: Boolean(row.online),
     meta: {
       ...META,
+      ...(row.meta || {}),
       name: name || host,
-      tags: ['hollow-net', 'pending-agent'],
+      virtualization: row.meta?.virtualization || staticData.system?.virtualization || 'hollow-net',
+      tags: tagsFor(row, hasAgent),
     },
-    static: {
-      uuid,
-      timestamp,
-      system: {
-        system_host_name: host || name,
-        system_name: 'hollow-net',
-        virtualization: 'hollow-net',
-      },
-    },
-    dynamic: null,
-    history: [],
+    static: staticData,
+    dynamic: row.dynamic || null,
+    history: row.history || [],
   }
 }
 
@@ -1024,33 +1045,29 @@ import { mergeHollowNodes, useHollowNodes } from './hooks/useHollowNodes'|" "$ap
 write_statusshow_config_file() {
   config_output="$1"
   mkdir -p "$(dirname "$config_output")"
-  if [ -n "$NODEGET_VISITOR_TOKEN" ]; then
-    site_tokens_json=$(cat <<EOF
-[
-    {
-      "name": $(json_string "$NODEGET_SERVER_NAME"),
-      "backend_url": $(json_string "wss://${NODEGET_STATUS_HOSTNAME}/nodeget-ws"),
-      "token": $(json_string "$NODEGET_VISITOR_TOKEN")
-    }
-  ]
-EOF
-)
-  else
-    site_tokens_json='[]'
-  fi
   cat >"$config_output" <<EOF
 {
   "site_name": $(json_string "$NODEGET_STATUS_SITE_NAME"),
   "site_logo": $(json_string "$NODEGET_STATUS_LOGO"),
   "footer": $(json_string "$NODEGET_STATUS_FOOTER"),
   "hollow_net_inventory": true,
-  "site_tokens": ${site_tokens_json}
+  "site_tokens": []
 }
 EOF
 }
 
 write_statusshow_config() {
   write_statusshow_config_file "${SRC_DIR}/public/config.json"
+}
+
+write_nodeget_poller_env() {
+  cat >"$NODEGET_POLLER_ENV" <<EOF
+NODEGET_SERVER_URL=$(shell_quote "http://${NODEGET_SERVER_LISTEN}")
+NODEGET_VISITOR_TOKEN=$(shell_quote "$NODEGET_VISITOR_TOKEN")
+NODEGET_PUBLISH_AGENT_DATA=1
+EOF
+  chmod 0600 "$NODEGET_POLLER_ENV"
+  chown root:root "$NODEGET_POLLER_ENV"
 }
 
 pin_statusshow_build_toolchain() {
@@ -1126,8 +1143,18 @@ NODEGET_HOLLOW_SYNC_INTERVAL_SEC="${NODEGET_HOLLOW_SYNC_INTERVAL_SEC:-30}"
 NODEGET_HOLLOW_DNS_SUFFIXES="${NODEGET_HOLLOW_DNS_SUFFIXES:-net.hlwdot.com,hlwdot.com}"
 NODEGET_HOLLOW_NAME_ALIASES="${NODEGET_HOLLOW_NAME_ALIASES:-center:CNETER}"
 NODEGET_HOLLOW_PUBLISH_IP="${NODEGET_HOLLOW_PUBLISH_IP:-0}"
+NODEGET_POLLER_ENV_FILE="${NODEGET_POLLER_ENV_FILE:-/etc/hlwdot/nodeget-statusshow/hollow-sync.env}"
+NODEGET_SERVER_URL="${NODEGET_SERVER_URL:-http://127.0.0.1:2211}"
+NODEGET_VISITOR_TOKEN="${NODEGET_VISITOR_TOKEN:-}"
+NODEGET_PUBLISH_AGENT_DATA="${NODEGET_PUBLISH_AGENT_DATA:-0}"
 
 mkdir -p "$TMP_DIR"
+
+if [ -r "$NODEGET_POLLER_ENV_FILE" ]; then
+  set -a
+  . "$NODEGET_POLLER_ENV_FILE"
+  set +a
+fi
 
 json_string() {
   jq -Rn --arg value "$1" '$value'
@@ -1204,19 +1231,153 @@ hollow_id() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g'
 }
 
+nodeget_rpc() {
+  method="$1"
+  params_file="$2"
+  output_file="$3"
+  payload="${TMP_DIR}/nodeget-rpc.$$.$(printf '%s' "$method" | tr '/ ' '__').json"
+  jq -cn --arg method "$method" --slurpfile params "$params_file" \
+    '{jsonrpc:"2.0",method:$method,params:$params[0],id:1}' >"$payload"
+  curl -fsS --connect-timeout 3 --max-time 8 \
+    -H 'Content-Type: application/json' \
+    --data @"$payload" \
+    "$NODEGET_SERVER_URL" |
+    jq -c 'if .error then empty else .result end' >"$output_file"
+  rm -f "$payload"
+  [ -s "$output_file" ]
+}
+
+nodeget_write_params() {
+  output_file="$1"
+  shift
+  jq -cn --arg token "$NODEGET_VISITOR_TOKEN" "$@" >"$output_file"
+}
+
+nodeget_collect_files() {
+  prefix="$1"
+  uuids_file="${prefix}.uuids.json"
+  static_file="${prefix}.static.json"
+  dynamic_file="${prefix}.dynamic.json"
+  meta_file="${prefix}.meta.json"
+  params_file="${prefix}.params.json"
+
+  : >"$uuids_file"
+  : >"$static_file"
+  : >"$dynamic_file"
+  : >"$meta_file"
+
+  [ "$NODEGET_PUBLISH_AGENT_DATA" = 1 ] || [ "$NODEGET_PUBLISH_AGENT_DATA" = true ] || return 1
+  [ -n "$NODEGET_VISITOR_TOKEN" ] || return 1
+  nodeget_write_params "$params_file" '{token:$token}'
+  nodeget_rpc nodeget-server_list_all_agent_uuid "$params_file" "$uuids_file" || return 1
+  jq -e '.uuids and (.uuids | length > 0)' "$uuids_file" >/dev/null || return 1
+
+  jq -cn \
+    --arg token "$NODEGET_VISITOR_TOKEN" \
+    --slurpfile u "$uuids_file" \
+    '{token:$token, uuids:$u[0].uuids, fields:["cpu","system"]}' >"$params_file"
+  nodeget_rpc agent_static_data_multi_last_query "$params_file" "$static_file" || printf '[]\n' >"$static_file"
+
+  jq -cn \
+    --arg token "$NODEGET_VISITOR_TOKEN" \
+    --slurpfile u "$uuids_file" \
+    '{token:$token, uuids:$u[0].uuids, fields:["cpu_usage","used_memory","total_memory","available_memory","used_swap","total_swap","total_space","available_space","read_speed","write_speed","receive_speed","transmit_speed","total_received","total_transmitted","load_one","load_five","load_fifteen","uptime","boot_time","process_count","tcp_connections","udp_connections"]}' >"$params_file"
+  nodeget_rpc agent_dynamic_summary_multi_last_query "$params_file" "$dynamic_file" || printf '[]\n' >"$dynamic_file"
+
+  jq -cn \
+    --arg token "$NODEGET_VISITOR_TOKEN" \
+    --slurpfile u "$uuids_file" \
+    '{token:$token, namespace_key:($u[0].uuids | map(. as $uuid | ["metadata_name","metadata_region","metadata_tags","metadata_hidden","metadata_virtualization","metadata_latitude","metadata_longitude","metadata_order","metadata_price","metadata_price_unit","metadata_price_cycle","metadata_expire_time"] | map({namespace:$uuid,key:.})) | add // [])}' >"$params_file"
+  nodeget_rpc kv_get_multi_value "$params_file" "$meta_file" || printf '[]\n' >"$meta_file"
+  return 0
+}
+
+enrich_with_nodeget() {
+  input_file="$1"
+  output_file="$2"
+  prefix="${TMP_DIR}/nodeget-data.$$"
+
+  if ! nodeget_collect_files "$prefix"; then
+    cp "$input_file" "$output_file"
+    rm -f "${prefix}".*
+    return 0
+  fi
+
+  jq \
+    --slurpfile uuids "${prefix}.uuids.json" \
+    --slurpfile static "${prefix}.static.json" \
+    --slurpfile dynamic "${prefix}.dynamic.json" \
+    --slurpfile meta "${prefix}.meta.json" '
+    def clean_host:
+      (. // "" | tostring | ascii_downcase | sub("[.]$"; ""));
+    def short_host:
+      clean_host | split(".")[0];
+    def same_host($a; $b):
+      (($a | clean_host) != "" and ($a | clean_host) == ($b | clean_host)) or
+      (($a | short_host) != "" and ($a | short_host) == ($b | short_host));
+    def by_uuid($rows):
+      reduce ($rows // [])[] as $r ({}; if $r.uuid then .[$r.uuid] = $r else . end);
+    def meta_by_uuid($rows):
+      reduce ($rows // [])[] as $r ({}; if $r.namespace and $r.key then .[$r.namespace][$r.key] = $r.value else . end);
+    def safe_meta($m):
+      {
+        name: ($m.metadata_name // null),
+        region: ($m.metadata_region // ""),
+        tags: (if ($m.metadata_tags | type) == "array" then $m.metadata_tags else [] end),
+        hidden: ($m.metadata_hidden // false),
+        virtualization: ($m.metadata_virtualization // "hollow-net"),
+        lat: ($m.metadata_latitude // null),
+        lng: ($m.metadata_longitude // null),
+        order: ($m.metadata_order // 9000),
+        price: ($m.metadata_price // 0),
+        priceUnit: ($m.metadata_price_unit // "$"),
+        priceCycle: ($m.metadata_price_cycle // 30),
+        expireTime: ($m.metadata_expire_time // "")
+      };
+    ($static[0] // [] | by_uuid(.)) as $stat |
+    ($dynamic[0] // [] | by_uuid(.)) as $dyn |
+    ($meta[0] // [] | meta_by_uuid(.)) as $meta_map |
+    (($uuids[0].uuids // []) | map({
+      uuid: .,
+      static: ($stat[.] // {}),
+      dynamic: ($dyn[.] // null),
+      meta: safe_meta($meta_map[.] // {})
+    })) as $agents |
+    .nodes |= map(
+      . as $n |
+      ([$agents[] | select(
+        same_host(.static.system.system_host_name; $n.hostname) or
+        same_host(.static.system.system_host_name; $n.id) or
+        same_host(.meta.name; $n.name)
+      )][0]) as $a |
+      if $a then
+        . + {
+          static: (($a.static // {}) + {uuid: ("hollow:" + .id)}),
+          dynamic: (if $a.dynamic then ($a.dynamic + {uuid: ("hollow:" + .id)}) else null end),
+          meta: ($a.meta + {name: (.name // $a.meta.name // .hostname)})
+        }
+      else . end
+    )
+  ' "$input_file" >"$output_file"
+  rm -f "${prefix}".*
+}
+
 write_once() {
-  rm -f "${TMP_DIR}"/hollow-status.* "${TMP_DIR}"/hollow-rows.* "${TMP_DIR}"/hollow-nodes.* 2>/dev/null || true
+  rm -f "${TMP_DIR}"/hollow-status.* "${TMP_DIR}"/hollow-rows.* "${TMP_DIR}"/hollow-nodes.* "${TMP_DIR}"/nodeget-data.* "${TMP_DIR}"/nodeget-rpc.* 2>/dev/null || true
   status_file="${TMP_DIR}/hollow-status.$$"
   rows_file="${TMP_DIR}/hollow-rows.$$"
   out_file="${TMP_DIR}/hollow-nodes.$$"
+  final_file="${TMP_DIR}/hollow-nodes.final.$$"
   now=$(date +%s)
 
   if [ -n "${TAILSCALE_STATUS_JSON_FILE:-}" ] && [ -r "$TAILSCALE_STATUS_JSON_FILE" ]; then
     cp "$TAILSCALE_STATUS_JSON_FILE" "$status_file"
   elif ! tailscale status --json >"$status_file" 2>/dev/null; then
     printf '{"generated_at":%s,"source":"hollow-net","nodes":[]}\n' "$now" >"$out_file"
-    mv "$out_file" "$HOLLOW_JSON"
-    rm -f "$status_file" "$rows_file" "$out_file"
+    enrich_with_nodeget "$out_file" "$final_file"
+    mv "$final_file" "$HOLLOW_JSON"
+    chmod 0644 "$HOLLOW_JSON"
+    rm -f "$status_file" "$rows_file" "$out_file" "$final_file"
     return 0
   fi
 
@@ -1256,9 +1417,10 @@ write_once() {
     done <"$rows_file"
     printf ']}\n'
   } >"$out_file"
-  mv "$out_file" "$HOLLOW_JSON"
+  enrich_with_nodeget "$out_file" "$final_file"
+  mv "$final_file" "$HOLLOW_JSON"
   chmod 0644 "$HOLLOW_JSON"
-  rm -f "$status_file" "$rows_file" "$out_file"
+  rm -f "$status_file" "$rows_file" "$out_file" "$final_file"
 }
 
 if [ "${NODEGET_HOLLOW_SYNC_ONCE:-0}" = 1 ]; then
@@ -1294,6 +1456,7 @@ export NODEGET_HOLLOW_SYNC_INTERVAL_SEC="${NODEGET_HOLLOW_SYNC_INTERVAL_SEC}"
 export NODEGET_HOLLOW_DNS_SUFFIXES="$(printf '%s' "$NODEGET_HOLLOW_DNS_SUFFIXES" | sed 's/"/\\"/g')"
 export NODEGET_HOLLOW_NAME_ALIASES="$(printf '%s' "$NODEGET_HOLLOW_NAME_ALIASES" | sed 's/"/\\"/g')"
 export NODEGET_HOLLOW_PUBLISH_IP="${NODEGET_HOLLOW_PUBLISH_IP}"
+export NODEGET_POLLER_ENV_FILE="${NODEGET_POLLER_ENV}"
 
 depend() {
   need net
@@ -1324,7 +1487,7 @@ http://:${port} {
     X-Content-Type-Options nosniff
     Referrer-Policy no-referrer
     Permissions-Policy "camera=(), microphone=(), geolocation=()"
-    Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://${NODEGET_STATUS_HOSTNAME}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
   }
 
   @inventory path /hollow-nodes.json
@@ -1334,16 +1497,47 @@ http://:${port} {
     file_server
   }
 
-  handle /nodeget-ws* {
-    rewrite * /
-    reverse_proxy http://${NODEGET_SERVER_LISTEN}
-  }
-
-  handle {
+  @config path /config.json
+  header @config Cache-Control "no-store"
+  handle /config.json {
     root * ${DIST_DIR}
-    try_files {path} /index.html
     file_server
   }
+
+  handle / {
+    root * ${DIST_DIR}
+    file_server
+  }
+  handle /index.html {
+    root * ${DIST_DIR}
+    file_server
+  }
+  handle /assets/* {
+    root * ${DIST_DIR}
+    file_server
+  }
+  handle /linux-logo-icon/* {
+    root * ${DIST_DIR}
+    file_server
+  }
+  handle /logo.png {
+    root * ${DIST_DIR}
+    file_server
+  }
+  handle /world-110m.json {
+    root * ${DIST_DIR}
+    file_server
+  }
+  handle /custom.css {
+    root * ${DIST_DIR}
+    file_server
+  }
+  handle /custom.js {
+    root * ${DIST_DIR}
+    file_server
+  }
+
+  respond 404
 }
 EOF
   chown root:caddy "$CADDYFILE"
@@ -1672,6 +1866,20 @@ wait_for_http() {
   die "${label} 不可读。"
 }
 
+wait_for_http_status() {
+  url="$1"
+  expected="$2"
+  label="$3"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    status=$(curl -sS --connect-timeout 5 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)
+    [ "$status" = "$expected" ] && return 0
+    i=$((i + 1))
+    sleep 1
+  done
+  die "${label} HTTP 状态不是 ${expected}。"
+}
+
 verify_nodeget_server_listener() {
   server_port=$(nodeget_server_port)
   command_exists ss || return 0
@@ -1735,6 +1943,8 @@ verify_services() {
   fi
   wait_for_http "http://${NODEGET_STATUS_LISTEN}/config.json" "本地 StatusShow 配置"
   wait_for_http "http://${NODEGET_STATUS_LISTEN}/hollow-nodes.json" "hollow-net inventory"
+  wait_for_http_status "http://${NODEGET_STATUS_LISTEN}/nodeget-ws" 404 "NodeGet RPC 公网入口"
+  wait_for_http_status "http://${NODEGET_STATUS_LISTEN}/etc/passwd" 404 "未授权路径"
 }
 
 self_test_require_base() {
@@ -1794,7 +2004,9 @@ self_test_frontend_build() {
   rm -rf "$npm_cache"
   [ -s "${SRC_DIR}/dist/index.html" ] || die "自检构建失败：缺少 dist/index.html"
   grep -R "hollow-nodes.json" "${SRC_DIR}/dist" >/dev/null 2>&1 || die "自检构建失败：产物缺少 hollow-net inventory 逻辑"
-  jq -e '.hollow_net_inventory == true and .site_tokens[0].backend_url == "wss://nodeget-selftest.example.com/nodeget-ws"' "${SRC_DIR}/public/config.json" >/dev/null
+  jq -e '.hollow_net_inventory == true and .site_tokens == []' "${SRC_DIR}/public/config.json" >/dev/null
+  ! grep -R "self-test-key:self-test-secret" "${SRC_DIR}/public" "${SRC_DIR}/dist" >/dev/null 2>&1 ||
+    die "自检构建失败：公开产物包含 NodeGet token。"
   log "自检通过：StatusShow 构建。"
 }
 
@@ -1923,6 +2135,15 @@ self_test_security_static() {
     END { exit found ? 0 : 1 }
   ' "$0"; then
     die "安全自检失败：脚本不应配置防火墙或要求 Cloudflare DNS 全局密钥。"
+  fi
+  if awk '
+    /^self_test_security_static\(\) \{/ { skip = 1; next }
+    skip && /^}/ { skip = 0; next }
+    skip { next }
+    /handle \/nodeget-ws|reverse_proxy http:\/\/\$\{NODEGET_SERVER_LISTEN\}|wss:\/\/\$\{NODEGET_STATUS_HOSTNAME\}/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$0"; then
+    die "安全自检失败：公网 Caddy 不应暴露 NodeGet RPC。"
   fi
   log "自检通过：静态安全边界。"
 }
@@ -2075,13 +2296,13 @@ print_summary() {
   printf '\nNodeGet StatusShow 部署完成。\n'
   printf '  public hostname：%s\n' "$NODEGET_STATUS_HOSTNAME"
   printf '  local status：http://%s\n' "$NODEGET_STATUS_LISTEN"
-  printf '  local websocket：%s\n' "$NODEGET_SERVER_LISTEN"
+  printf '  local rpc：%s\n' "$NODEGET_SERVER_LISTEN"
   if [ "$NODEGET_AGENT_INGRESS_ENABLE" = 1 ] || [ "$NODEGET_AGENT_INGRESS_ENABLE" = true ]; then
     printf '  agent hollow-net ws：ws://%s:%s\n' "$(resolve_agent_listen_addr)" "$NODEGET_AGENT_LISTEN_PORT"
   fi
   printf '  hollow inventory：%s\n' "$HOLLOW_JSON"
   printf '  初始化凭据：%s\n' "$NODEGET_CREDENTIALS"
-  printf '  Cloudflare：Tunnel token 模式，无 DNS API key。\n'
+  printf '  public paths：/, /config.json, /hollow-nodes.json, /assets/*, /linux-logo-icon/*, /logo.png, /world-110m.json, /custom.css, /custom.js\n'
 }
 
 main() {
@@ -2130,6 +2351,7 @@ main() {
   init_nodeget_server
   write_tailnet_ingress_service
   build_statusshow
+  write_nodeget_poller_env
   write_hollow_sync_script
   write_hollow_sync_service
   write_caddy_config
