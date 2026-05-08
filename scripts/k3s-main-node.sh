@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # k3s 主节点部署脚本。
 #
-# 适合 Kubernetes 控制节点使用。脚本只检查本机已经接入 Headscale，
-# 然后部署 k3s server，最后按配置部署 Flux GitOps。
+# 适合 Kubernetes 控制节点使用。脚本会确认本机已接入 Headscale，
+# 然后部署 k3s server，并按配置部署 Flux GitOps。
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -30,8 +30,8 @@ usage() {
 
 说明：
   - 用于 k3s 主节点。
-  - 只检查 Headscale 接入状态，不会执行基础初始化或 Headscale 接入。
-  - 必须已经能通过 ${HOLLOW_NET_IFACE:-hollow-net} 访问 Headscale 网络。
+  - 运行前会确认本机已接入 Headscale 网络。
+  - Debian 13 基础初始化和 Headscale 接入请先从菜单执行。
   - K3S_MAIN_ENABLE_FLUX=1 时会自动部署 Flux GitOps。
 EOF
 }

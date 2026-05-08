@@ -46,9 +46,6 @@ validate_input() {
   cloudflare_configured || die "请设置 CLOUDFLARE_API_TOKEN，或同时设置 CLOUDFLARE_EMAIL 与 CLOUDFLARE_API_KEY。"
   validate_bool CLOUDFLARE_DNS_PROXIED "$CLOUDFLARE_DNS_PROXIED"
   validate_bool CLOUDFLARE_HEADSCALE_DNS "$CLOUDFLARE_HEADSCALE_DNS"
-  if [[ "$CLOUDFLARE_HEADSCALE_DNS" == "1" && "$CLOUDFLARE_DNS_PROXIED" == "1" ]]; then
-    die "Headscale DNS 记录不能开启 Cloudflare 代理，请设置 CLOUDFLARE_DNS_PROXIED=0。"
-  fi
   [[ "$CLOUDFLARE_DNS_TTL" =~ ^[0-9]+$ ]] || die "CLOUDFLARE_DNS_TTL 必须是数字。"
 }
 
@@ -86,7 +83,7 @@ configure_records() {
   if [[ "$CLOUDFLARE_HEADSCALE_DNS" == "1" ]]; then
     [[ -n "$HEADSCALE_SERVER_URL" ]] || die "CLOUDFLARE_HEADSCALE_DNS=1 时必须设置 HEADSCALE_SERVER_URL。"
     host="$(url_host "$HEADSCALE_SERVER_URL")"
-    cloudflare_upsert_record "$host" A "$target" "$CLOUDFLARE_DNS_PROXIED" "$CLOUDFLARE_DNS_TTL"
+    cloudflare_upsert_record "$host" A "$target" 0 "$CLOUDFLARE_DNS_TTL"
   fi
 
   while IFS= read -r name; do

@@ -44,7 +44,6 @@ HEADSCALE_EXCLUSIVE_PUBLIC_PORTS="${HEADSCALE_EXCLUSIVE_PUBLIC_PORTS:-1}"
 HEADSCALE_DISABLE_K3S_CONFLICTS="${HEADSCALE_DISABLE_K3S_CONFLICTS:-1}"
 CLOUDFLARE_HEADSCALE_DNS="${CLOUDFLARE_HEADSCALE_DNS:-1}"
 CLOUDFLARE_DNS_TARGET_IPV4="${CLOUDFLARE_DNS_TARGET_IPV4:-auto}"
-CLOUDFLARE_DNS_PROXIED="${CLOUDFLARE_DNS_PROXIED:-0}"
 CLOUDFLARE_DNS_TTL="${CLOUDFLARE_DNS_TTL:-120}"
 
 usage() {
@@ -160,11 +159,7 @@ validate_input() {
   validate_bool HEADSCALE_EXCLUSIVE_PUBLIC_PORTS "$HEADSCALE_EXCLUSIVE_PUBLIC_PORTS"
   validate_bool HEADSCALE_DISABLE_K3S_CONFLICTS "$HEADSCALE_DISABLE_K3S_CONFLICTS"
   validate_bool CLOUDFLARE_HEADSCALE_DNS "$CLOUDFLARE_HEADSCALE_DNS"
-  validate_bool CLOUDFLARE_DNS_PROXIED "$CLOUDFLARE_DNS_PROXIED"
   [[ "$HEADSCALE_CADDY_VERIFY_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die "HEADSCALE_CADDY_VERIFY_TIMEOUT_SEC 必须是数字。"
-  if [[ "$CLOUDFLARE_HEADSCALE_DNS" == "1" && "$CLOUDFLARE_DNS_PROXIED" == "1" ]]; then
-    die "Headscale DNS 记录不能开启 Cloudflare 代理，请设置 CLOUDFLARE_DNS_PROXIED=0。"
-  fi
   [[ "$HEADSCALE_DNS_BASE_DOMAIN" == *.* ]] || die "HEADSCALE_DNS_BASE_DOMAIN 必须是 FQDN。"
   [[ "$HEADSCALE_DNS_BASE_DOMAIN" != "$(url_host "$HEADSCALE_SERVER_URL")" ]] || die "HEADSCALE_DNS_BASE_DOMAIN 不能与 HEADSCALE_SERVER_URL 的域名相同。"
   validate_backup_config
@@ -640,16 +635,16 @@ configure_cloudflare_dns_if_needed() {
   else
     target="$CLOUDFLARE_DNS_TARGET_IPV4"
   fi
-  cloudflare_upsert_record "$host" A "$target" "$CLOUDFLARE_DNS_PROXIED" "$CLOUDFLARE_DNS_TTL"
+  cloudflare_upsert_record "$host" A "$target" 0 "$CLOUDFLARE_DNS_TTL"
 }
 
 verify_headscale_boot_persistence() {
-  systemctl is-enabled --quiet headscale || die "headscale.service 未设置开机自启，主机重启后不会自动恢复。"
-  systemctl is-active --quiet headscale || die "headscale.service 未运行。"
+  systemctl is-enabled --quiet headscale || die "headscale.service 未设置开机自启；请运行 systemctl enable headscale.service 后重试。"
+  systemctl is-active --quiet headscale || die "headscale.service 未运行；请运行 systemctl status headscale.service 查看服务错误。"
 
   if [[ "$HEADSCALE_ENABLE_CADDY" == "1" ]]; then
-    systemctl is-enabled --quiet caddy || die "caddy.service 未设置开机自启，主机重启后 HTTPS 入口不会自动恢复。"
-    systemctl is-active --quiet caddy || die "caddy.service 未运行。"
+    systemctl is-enabled --quiet caddy || die "caddy.service 未设置开机自启；请运行 systemctl enable caddy.service 后重试。"
+    systemctl is-active --quiet caddy || die "caddy.service 未运行；请运行 systemctl status caddy.service 查看服务错误。"
   fi
 }
 

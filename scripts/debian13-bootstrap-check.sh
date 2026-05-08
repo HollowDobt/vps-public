@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Debian 13 基础配置只读校验脚本。
+# Debian 13 基础配置校验脚本。
 #
-# 本脚本只读取系统状态，不修改配置、不创建状态文件、不尝试修复问题。
 # 校验目标与 debian13-bootstrap.sh 保持一致：系统版本、hollow 用户、
 # SSH、sudo、UFW、fail2ban、自动安全更新、chrony、locale、timezone、
 # BBR、swapfile、受管状态文件和中断恢复标记。
@@ -37,6 +36,10 @@ ROOT_KEYS_PRESENT=0
 ROOT_KEYS_VALID=0
 HOLLOW_KEYS_PRESENT=0
 HOLLOW_KEYS_VALID=0
+
+log_location() {
+  hostname 2>/dev/null || printf 'unknown'
+}
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'
@@ -105,7 +108,7 @@ usage() {
   VERIFY_SWAP_SIZE=auto                 # auto、0、1024M、2G
 
 说明：
-  - 只读校验，不修复、不写入系统配置。
+  - 校验 Debian 13 基础初始化结果。
   - 默认读取 bootstrap 完成标记中的用户、swapfile、UFW、fail2ban、BBR 和 SSH 策略。
   - 有 FAIL 时退出码为 1；无 FAIL 但有 WARN 时退出码为 2；全部通过时退出码为 0。
 EOF
@@ -437,7 +440,7 @@ check_package_state() {
   fi
 
   # apt 缓存只做状态提示，不作为硬性完成条件。目录不存在时直接记为 WARN，
-  # 避免只读校验因为环境差异提前中断。
+  # 避免校验因为环境差异提前中断。
   if [[ -d /var/cache/apt/archives ]]; then
     deb_count="$(find /var/cache/apt/archives -maxdepth 1 -name '*.deb' 2>/dev/null | wc -l | tr -d ' ')"
     if [[ "$deb_count" == "0" ]]; then
@@ -900,7 +903,7 @@ main() {
       ;;
     *)
       usage
-      printf '[%s] 错误：未知参数：%s\n' "$SCRIPT_NAME" "$1" >&2
+      printf '[%s] ERROR：%s 在 %s 执行校验脚本时发生错误：未知参数：%s；请使用 --help 查看支持的参数。\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$1" >&2
       return 1
       ;;
   esac

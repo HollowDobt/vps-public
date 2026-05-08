@@ -16,16 +16,20 @@ TEMP_FILES=()
 RUN_MARKER=''
 DONE_MARKER=''
 
+log_location() {
+  hostname 2>/dev/null || printf 'unknown'
+}
+
 log() {
-  printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
+  printf '[%s] INFO：%s 在 %s 执行：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*"
 }
 
 warn() {
-  printf '[%s] 警告：%s\n' "$SCRIPT_NAME" "$*" >&2
+  printf '[%s] WARN：%s 在 %s 执行时提示：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
 }
 
 die() {
-  printf '[%s] 错误：%s\n' "$SCRIPT_NAME" "$*" >&2
+  printf '[%s] ERROR：%s 在 %s 执行脚本时发生错误：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
   exit 1
 }
 
@@ -116,7 +120,7 @@ on_error() {
   local failed_command="${2:-未知命令}"
 
   [[ "$exit_code" -eq 0 ]] && return 0
-  warn "第 ${line_no} 行执行失败：${failed_command}"
+  warn "第 ${line_no} 行执行命令失败：${failed_command}；请查看上方命令输出。"
   exit "$exit_code"
 }
 
@@ -383,8 +387,12 @@ cloudflare_upsert_record() {
   local record_id
   local body
   local proxied_json=false
+  local proxy_label='关闭'
 
-  [[ "$proxied" == "1" ]] && proxied_json=true
+  if [[ "$proxied" == "1" ]]; then
+    proxied_json=true
+    proxy_label='开启'
+  fi
   zone_id="$(cloudflare_zone_id_for_name "$name")"
   response="$(cloudflare_request GET "/zones/${zone_id}/dns_records?type=${type}&name=${name}")"
   record_id="$(jq -r '.result[0].id // empty' <<<"$response")"
@@ -401,7 +409,7 @@ cloudflare_upsert_record() {
   else
     cloudflare_request POST "/zones/${zone_id}/dns_records" "$body" >/dev/null
   fi
-  log "Cloudflare DNS：${type} ${name} -> ${content}"
+  log "Cloudflare DNS：${type} ${name} -> ${content}，Cloudflare 代理：${proxy_label}"
 }
 
 cloudflare_configured() {

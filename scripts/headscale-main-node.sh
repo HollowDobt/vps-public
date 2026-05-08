@@ -33,7 +33,7 @@ usage() {
 
 说明：
   - 用于 Headscale 主节点首次部署。
-  - 不会执行 Debian 13 基础初始化；需要时先从菜单单独执行。
+  - Debian 13 基础初始化请先从菜单单独执行。
   - HEADSCALE_SERVER_URL 可设置为 auto；如果设置了 CLOUDFLARE_ZONE，
     默认使用 https://headscale.\$CLOUDFLARE_ZONE。
   - 脚本会把生成的 hostname、auth key、Headscale IP 写入 /etc/hlwdot/vps.env。

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VPS 脚本交互菜单。
 #
-# 用一个简洁入口选择执行重装、基础初始化或只读校验脚本。
+# 用一个入口选择执行重装、基础初始化或校验脚本。
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -49,11 +49,11 @@ MENU_GROUPS=(
 MENU_HINTS=(
   "启动 Debian 13 重装"
   "首次配置并立即校验"
-  "只读检查当前状态"
-  "安装 Headscale、配置 DNS/Caddy、本机接入，不跑基础初始化"
-  "给新节点使用的一次性 key"
+  "校验基础初始化结果"
+  "安装 Headscale、配置 DNS/Caddy、按配置接入本机"
+  "生成新节点接入密钥"
   "当前节点加入 Headscale 网络"
-  "只接入 Headscale 网络，可上报分流路由，不部署 k3s"
+  "接入 Headscale 网络，可上报分流路由"
   "检查 Headscale 网络，部署 server、记录 token、部署 GitOps"
   "建议先执行系统重装；初始化、接入 Headscale 网络、部署 k3s 子节点"
   "检查 Headscale 网络，部署 agent"
@@ -91,7 +91,7 @@ else
 fi
 
 log_error() {
-  printf '%s[%s] 错误：%s%s\n' "$C_RED" "$SCRIPT_NAME" "$*" "$C_RESET" >&2
+  printf '%s[%s] ERROR：%s 在 %s 执行菜单时发生错误：%s%s\n' "$C_RED" "$SCRIPT_NAME" "$SCRIPT_NAME" "$(hostname 2>/dev/null || printf 'unknown')" "$*" "$C_RESET" >&2
 }
 
 cursor_hide() {

@@ -124,7 +124,7 @@ install_tailscale() {
 configure_tun_module() {
   local temp_file
 
-  modprobe tun 2>/dev/null || warn "tun 模块加载失败，稍后请检查当前 VPS 内核。"
+  modprobe tun 2>/dev/null || warn "modprobe 在本机加载 tun 模块时失败；请检查当前 VPS 内核是否启用 TUN。"
   temp_file="$(mktemp_managed)"
   printf 'tun\n' >"$temp_file"
   atomic_install_file "$temp_file" "$TUN_MODULES" 0644 root root
@@ -285,16 +285,16 @@ run_tailscale_up() {
 verify_tailnet_ready() {
   local ip4
 
-  tailscale status --self >/dev/null 2>&1 || die "tailscale 状态未就绪。"
+  tailscale status --self >/dev/null 2>&1 || die "tailscale 状态未就绪；请运行 tailscale status 查看当前登录状态。"
   ip4="$(tailscale_ipv4 || true)"
-  [[ -n "$ip4" ]] || die "未获取到 Headscale IPv4 地址。"
-  ip link show "$HOLLOW_NET_IFACE" >/dev/null 2>&1 || die "未找到网卡 $HOLLOW_NET_IFACE。"
+  [[ -n "$ip4" ]] || die "未获取到 Headscale IPv4 地址；请运行 tailscale ip -4 查看分配结果。"
+  ip link show "$HOLLOW_NET_IFACE" >/dev/null 2>&1 || die "未找到网卡 $HOLLOW_NET_IFACE；请检查 HOLLOW_NET_IFACE 和 tailscaled 的 --tun 配置。"
 }
 
 verify_reboot_persistence() {
-  systemctl is-enabled --quiet tailscaled || die "tailscaled.service 未设置开机自启，主机重启后不会自动接入。"
-  systemctl is-active --quiet tailscaled || die "tailscaled.service 未运行。"
-  [[ -s /var/lib/tailscale/tailscaled.state ]] || die "缺少 /var/lib/tailscale/tailscaled.state，主机重启后无法保持登录状态。"
+  systemctl is-enabled --quiet tailscaled || die "tailscaled.service 未设置开机自启；请运行 systemctl enable tailscaled.service 后重试。"
+  systemctl is-active --quiet tailscaled || die "tailscaled.service 未运行；请运行 systemctl status tailscaled.service 查看服务错误。"
+  [[ -s /var/lib/tailscale/tailscaled.state ]] || die "缺少 /var/lib/tailscale/tailscaled.state；请重新执行 Headscale 接入脚本生成登录状态。"
 }
 
 persist_tailnet_state() {

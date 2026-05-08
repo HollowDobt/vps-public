@@ -1,9 +1,8 @@
 #!/bin/sh
 # Alpine Headscale 网络接入脚本。
 #
-# 用于低配 Alpine VPS。脚本只安装并配置 Tailscale/OpenRC，
-# 然后把当前节点接入 Headscale 管理的内网，不处理 Debian 初始化，
-# 也不部署 k3s。
+# 面向低配 Alpine VPS：安装并配置 Tailscale/OpenRC，
+# 然后把当前节点接入 Headscale 管理的内网。
 
 set -eu
 umask 027
@@ -25,16 +24,20 @@ TAILNET_DNSMASQ_CONF="/etc/dnsmasq.d/90-hlwdot-tailnet.conf"
 TAILNET_DNS_RESOLV_BACKUP="/etc/hlwdot/tailnet-dns.original-resolv.conf"
 TAILNET_DNS_UPSTREAMS_FILE="/etc/hlwdot/tailnet-dns.upstreams"
 
+log_location() {
+  hostname 2>/dev/null || printf 'unknown'
+}
+
 log() {
-  printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
+  printf '[%s] INFO：%s 在 %s 执行：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*"
 }
 
 warn() {
-  printf '[%s] 警告：%s\n' "$SCRIPT_NAME" "$*" >&2
+  printf '[%s] WARN：%s 在 %s 执行时提示：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
 }
 
 die() {
-  printf '[%s] 错误：%s\n' "$SCRIPT_NAME" "$*" >&2
+  printf '[%s] ERROR：%s 在 %s 执行脚本时发生错误：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
   exit 1
 }
 
@@ -63,7 +66,7 @@ on_interrupt() {
 }
 
 on_error() {
-  warn "执行失败，请检查上方输出。"
+  warn "脚本收到 HUP 信号或命令执行失败；请查看上方命令输出。"
   exit 1
 }
 
@@ -97,7 +100,7 @@ usage() {
 
 说明：
   - 仅支持 Alpine Linux + OpenRC。
-  - 默认只接入 Headscale 网络，不部署 k3s。
+  - 默认接入 Headscale 网络，可按配置上报分流路由。
   - LXD 容器里默认用 dnsmasq 保留原 DNS，并把 Headscale DNS 域分流到 100.100.100.100。
   - 出站分流指 Headscale 网络内的机器访问本机代理端口。
   - 入站分流指公网端口转发到 Headscale 网络内部目标。
@@ -707,10 +710,10 @@ write_tailnet_dnsmasq_conf() {
   [ -n "$upstreams" ] || die "无法保留原 DNS 上游，请设置 ALPINE_TAILNET_DNS_UPSTREAMS。"
 
   printf '%s\n' "$domains" | while IFS= read -r domain; do
-    valid_dns_domain "$domain" || die "DNS 域名格式错误：$domain"
+    valid_dns_domain "$domain" || die "ALPINE_TAILNET_DNS_DOMAINS 包含无效域名：$domain；请修改 ALPINE_TAILNET_DNS_DOMAINS 后重试。"
   done
   printf '%s\n' "$upstreams" | while IFS= read -r upstream; do
-    valid_dns_upstream "$upstream" || die "DNS 上游格式错误：$upstream"
+    valid_dns_upstream "$upstream" || die "ALPINE_TAILNET_DNS_UPSTREAMS 包含无效上游：$upstream；请修改 ALPINE_TAILNET_DNS_UPSTREAMS 后重试。"
   done
 
   {
@@ -788,7 +791,7 @@ tailnet_dns_probe_name() {
 }
 
 verify_tailnet_dns_proxy() {
-  rc-service dnsmasq status >/dev/null 2>&1 || die "dnsmasq 未运行。"
+  rc-service dnsmasq status >/dev/null 2>&1 || die "dnsmasq 未运行；请运行 rc-service dnsmasq status 查看服务错误。"
   grep -Eq '^[[:space:]]*nameserver[[:space:]]+127[.]0[.]0[.]1([[:space:]]|$)' /etc/resolv.conf || die "/etc/resolv.conf 未指向本地 dnsmasq。"
   nslookup github.com 127.0.0.1 >/dev/null 2>&1 || die "本地 dnsmasq 无法转发普通公网 DNS。"
 
@@ -886,7 +889,7 @@ write_split_rules_script() {
     if [ "$ALPINE_SPLIT_DIRECTION" = outbound ] || [ "$ALPINE_SPLIT_DIRECTION" = both ]; then
       split_words "$ALPINE_SPLIT_OUTBOUND_PROXY_PORTS" | while IFS= read -r item; do
         [ -n "$item" ] || continue
-        validate_port_proto "$item" || die "ALPINE_SPLIT_OUTBOUND_PROXY_PORTS 格式错误：$item"
+        validate_port_proto "$item" || die "ALPINE_SPLIT_OUTBOUND_PROXY_PORTS 包含无效端口规则：$item；请使用 端口/协议 格式。"
         port=${item%/*}
         proto=${item#*/}
         printf 'iptables -A HLWDOT_SPLIT_INPUT -i "$HOLLOW_NET_IFACE" -p %s --dport %s -j ACCEPT\n' "$proto" "$port"
@@ -898,17 +901,17 @@ write_split_rules_script() {
         [ -n "$item" ] || continue
         left=${item%%=*}
         target=${item#*=}
-        [ "$left" != "$item" ] || die "ALPINE_SPLIT_INBOUND_FORWARDS 格式错误：$item"
-        validate_port_proto "$left" || die "ALPINE_SPLIT_INBOUND_FORWARDS 端口格式错误：$item"
+        [ "$left" != "$item" ] || die "ALPINE_SPLIT_INBOUND_FORWARDS 缺少转发目标：$item；请使用 端口/协议=目标IP:目标端口 格式。"
+        validate_port_proto "$left" || die "ALPINE_SPLIT_INBOUND_FORWARDS 包含无效入口端口：$item；请使用 端口/协议=目标IP:目标端口 格式。"
         listen_port=${left%/*}
         proto=${left#*/}
         target_ip=${target%:*}
         target_port=${target##*:}
-        [ "$target_ip" != "$target" ] || die "ALPINE_SPLIT_INBOUND_FORWARDS 目标格式错误：$item"
+        [ "$target_ip" != "$target" ] || die "ALPINE_SPLIT_INBOUND_FORWARDS 缺少目标端口：$item；请使用 目标IP:目标端口 格式。"
         case "$target_port" in
-          ''|*[!0-9]*) die "ALPINE_SPLIT_INBOUND_FORWARDS 目标端口错误：$item" ;;
+          ''|*[!0-9]*) die "ALPINE_SPLIT_INBOUND_FORWARDS 目标端口不是数字：$item；请修改目标端口后重试。" ;;
         esac
-        [ "$target_port" -ge 1 ] && [ "$target_port" -le 65535 ] || die "ALPINE_SPLIT_INBOUND_FORWARDS 目标端口越界：$item"
+        [ "$target_port" -ge 1 ] && [ "$target_port" -le 65535 ] || die "ALPINE_SPLIT_INBOUND_FORWARDS 目标端口超出 1-65535：$item；请修改目标端口后重试。"
         printf 'iptables -t nat -A HLWDOT_SPLIT_PREROUTING -i "$PUBLIC_IFACE" -p %s --dport %s -j DNAT --to-destination %s\n' "$proto" "$listen_port" "$target"
         printf 'iptables -A HLWDOT_SPLIT_FORWARD -i "$PUBLIC_IFACE" -o "$HOLLOW_NET_IFACE" -p %s -d %s --dport %s -j ACCEPT\n' "$proto" "$target_ip" "$target_port"
         printf 'iptables -t nat -A HLWDOT_SPLIT_POSTROUTING -o "$HOLLOW_NET_IFACE" -p %s -d %s --dport %s -j MASQUERADE\n' "$proto" "$target_ip" "$target_port"
@@ -1189,32 +1192,32 @@ run_tailscale_up() {
 verify_tailnet_ready() {
   ip4=''
 
-  tailscale status --self >/dev/null 2>&1 || die "tailscale 状态未就绪。"
+  tailscale status --self >/dev/null 2>&1 || die "tailscale 状态未就绪；请运行 tailscale status 查看当前登录状态。"
   ip4=$(tailscale ip -4 2>/dev/null | awk 'NF { print; exit }' || true)
-  [ -n "$ip4" ] || die "未获取到 Headscale IPv4 地址。"
+  [ -n "$ip4" ] || die "未获取到 Headscale IPv4 地址；请运行 tailscale ip -4 查看分配结果。"
   if command_exists ip; then
-    ip link show "$HOLLOW_NET_IFACE" >/dev/null 2>&1 || die "未找到网卡 $HOLLOW_NET_IFACE。"
+    ip link show "$HOLLOW_NET_IFACE" >/dev/null 2>&1 || die "未找到网卡 $HOLLOW_NET_IFACE；请检查 HOLLOW_NET_IFACE 和 tailscaled 的 --tun 配置。"
   fi
 }
 
 verify_reboot_persistence() {
   if ! rc-update show default 2>/dev/null | awk -v svc="$HOLLOW_OPENRC_SERVICE" '$1 == svc { found = 1 } END { exit found ? 0 : 1 }'; then
-    die "${HOLLOW_OPENRC_SERVICE} 未加入 default 运行级别，主机重启后不会自动接入。"
+    die "${HOLLOW_OPENRC_SERVICE} 未加入 default 运行级别；请运行 rc-update add ${HOLLOW_OPENRC_SERVICE} default 后重试。"
   fi
 
-  rc-service "$HOLLOW_OPENRC_SERVICE" status >/dev/null 2>&1 || die "${HOLLOW_OPENRC_SERVICE} 未运行。"
-  [ -s /var/lib/tailscale/tailscaled.state ] || die "缺少 /var/lib/tailscale/tailscaled.state，主机重启后无法保持登录状态。"
+  rc-service "$HOLLOW_OPENRC_SERVICE" status >/dev/null 2>&1 || die "${HOLLOW_OPENRC_SERVICE} 未运行；请运行 rc-service ${HOLLOW_OPENRC_SERVICE} status 查看服务错误。"
+  [ -s /var/lib/tailscale/tailscaled.state ] || die "缺少 /var/lib/tailscale/tailscaled.state；请重新执行 Alpine Headscale 接入脚本生成登录状态。"
 
   if split_rules_enabled; then
     [ -x "$SPLIT_LOCAL_SCRIPT" ] || die "分流规则未写入 $SPLIT_LOCAL_SCRIPT。"
     if ! rc-update show default 2>/dev/null | awk '$1 == "local" { found = 1 } END { exit found ? 0 : 1 }'; then
-      die "local 服务未加入 default 运行级别，主机重启后分流规则不会自动恢复。"
+      die "local 服务未加入 default 运行级别；请运行 rc-update add local default 后重试。"
     fi
   fi
 
   if tailnet_dns_needed; then
     if ! rc-update show default 2>/dev/null | awk '$1 == "dnsmasq" { found = 1 } END { exit found ? 0 : 1 }'; then
-      die "dnsmasq 未加入 default 运行级别，主机重启后本地 DNS 分流不会自动恢复。"
+      die "dnsmasq 未加入 default 运行级别；请运行 rc-update add dnsmasq default 后重试。"
     fi
   fi
 }

@@ -38,16 +38,20 @@ NODEGET_CLOUDFLARED_SERVICE="hlwdot-nodeget-cloudflared"
 HOLLOW_NET_IP=''
 SELF_TEST_ROOT=''
 
+log_location() {
+  hostname 2>/dev/null || printf 'unknown'
+}
+
 log() {
-  printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
+  printf '[%s] INFO：%s 在 %s 执行：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*"
 }
 
 warn() {
-  printf '[%s] 警告：%s\n' "$SCRIPT_NAME" "$*" >&2
+  printf '[%s] WARN：%s 在 %s 执行时提示：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
 }
 
 die() {
-  printf '[%s] 错误：%s\n' "$SCRIPT_NAME" "$*" >&2
+  printf '[%s] ERROR：%s 在 %s 执行脚本时发生错误：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
   exit 1
 }
 
@@ -73,7 +77,7 @@ usage() {
 
 说明：
   - 仅支持 Alpine Linux + OpenRC。
-  - 只读检查当前节点已在 hollow-net，不执行 Headscale 接入。
+  - 运行前会确认当前节点已接入 hollow-net；Headscale 接入请使用对应脚本。
   - NodeGet Server 与 Caddy 都只监听 127.0.0.1。
   - Agent 内网入口只绑定 hollow-net IPv4，不监听公网。
   - Cloudflare Tunnel 负责公网访问；DNS/API 配置为可选项。
@@ -560,7 +564,7 @@ require_hollow_net() {
   ip4=$(tailscale ip -4 2>/dev/null | awk 'NF { print; exit }' || true)
   [ -n "$ip4" ] || die "无法读取当前 hollow-net IPv4 地址。"
   HOLLOW_NET_IP="$ip4"
-  log "hollow-net 只读检查通过：$HOLLOW_NET_IFACE $ip4"
+  log "hollow-net 状态检查通过：$HOLLOW_NET_IFACE $ip4"
 }
 
 detect_nodeget_arch() {
@@ -1933,13 +1937,13 @@ verify_services() {
   if [ "$NODEGET_AGENT_INGRESS_ENABLE" = 1 ] || [ "$NODEGET_AGENT_INGRESS_ENABLE" = true ]; then
     agent_addr=$(resolve_agent_listen_addr)
     verify_tailnet_only_listener "$NODEGET_AGENT_LISTEN_PORT" "$agent_addr"
-    rc-service "$NODEGET_TAILNET_INGRESS_SERVICE" status >/dev/null 2>&1 || die "NodeGet Agent hollow-net 入口未运行。"
+    rc-service "$NODEGET_TAILNET_INGRESS_SERVICE" status >/dev/null 2>&1 || die "${NODEGET_TAILNET_INGRESS_SERVICE} 未运行；请运行 rc-service ${NODEGET_TAILNET_INGRESS_SERVICE} status 查看服务错误。"
   fi
-  rc-service "$NODEGET_SERVER_SERVICE" status >/dev/null 2>&1 || die "NodeGet Server 未运行。"
-  rc-service "$NODEGET_STATUS_CADDY_SERVICE" status >/dev/null 2>&1 || die "StatusShow Caddy 未运行。"
-  rc-service "$NODEGET_HOLLOW_SYNC_SERVICE" status >/dev/null 2>&1 || die "hollow-net 自动发现服务未运行。"
+  rc-service "$NODEGET_SERVER_SERVICE" status >/dev/null 2>&1 || die "${NODEGET_SERVER_SERVICE} 未运行；请运行 rc-service ${NODEGET_SERVER_SERVICE} status 查看服务错误。"
+  rc-service "$NODEGET_STATUS_CADDY_SERVICE" status >/dev/null 2>&1 || die "${NODEGET_STATUS_CADDY_SERVICE} 未运行；请运行 rc-service ${NODEGET_STATUS_CADDY_SERVICE} status 查看服务错误。"
+  rc-service "$NODEGET_HOLLOW_SYNC_SERVICE" status >/dev/null 2>&1 || die "${NODEGET_HOLLOW_SYNC_SERVICE} 未运行；请运行 rc-service ${NODEGET_HOLLOW_SYNC_SERVICE} status 查看服务错误。"
   if [ "$NODEGET_CLOUDFLARED_ENABLE" = 1 ] || [ "$NODEGET_CLOUDFLARED_ENABLE" = true ]; then
-    rc-service "$NODEGET_CLOUDFLARED_SERVICE" status >/dev/null 2>&1 || die "Cloudflare Tunnel 未运行。"
+    rc-service "$NODEGET_CLOUDFLARED_SERVICE" status >/dev/null 2>&1 || die "${NODEGET_CLOUDFLARED_SERVICE} 未运行；请运行 rc-service ${NODEGET_CLOUDFLARED_SERVICE} status 查看服务错误。"
   fi
   wait_for_http "http://${NODEGET_STATUS_LISTEN}/config.json" "本地 StatusShow 配置"
   wait_for_http "http://${NODEGET_STATUS_LISTEN}/hollow-nodes.json" "hollow-net inventory"

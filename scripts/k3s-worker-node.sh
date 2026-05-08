@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # k3s 子节点部署脚本。
 #
-# 适合普通工作节点使用。脚本只检查本机已经接入 Headscale，
+# 适合普通工作节点使用。脚本会确认本机已接入 Headscale，
 # 然后用主节点提供的地址与 token 接入 k3s 集群。
 
 set -Eeuo pipefail
@@ -29,8 +29,8 @@ usage() {
 
 说明：
   - 用于 k3s 子节点。
-  - 只检查 Headscale 接入状态，不会执行基础初始化或 Headscale 接入。
-  - 必须已经能通过 ${HOLLOW_NET_IFACE:-hollow-net} 访问 Headscale 网络。
+  - 运行前会确认本机已接入 Headscale 网络。
+  - Debian 13 基础初始化和 Headscale 接入请先从菜单执行。
   - 必须已经准备好 K3S_SERVER_URL，以及 K3S_AGENT_TOKEN 或 K3S_TOKEN。
 EOF
 }

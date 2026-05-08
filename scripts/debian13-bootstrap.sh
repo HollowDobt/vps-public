@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Debian 13 VPS 刷写系统后的首次基础配置脚本。
 #
-# 这个脚本只负责“新系统装好之后”的基础初始化，不负责重装系统、
-# 分区、格式化磁盘或迁移业务数据。默认目标是把一台干净的 Debian 13
-# VPS 配置成可以用 hollow 登录、具备基础安全防护、具备 BBR、swapfile、
-# 并且可以在被 Ctrl-C 中断后重新执行。
+# Debian 13 安装完成后的基础初始化：hollow 登录、基础安全防护、
+# BBR、swapfile，以及 Ctrl-C 中断后的可重复执行恢复。
 #
 # 推荐运行方式：
 #   sudo bash scripts/debian13-bootstrap.sh
@@ -14,8 +12,8 @@
 #   BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...' sudo bash scripts/debian13-bootstrap.sh
 #   BOOTSTRAP_SWAP_SIZE=2G sudo bash scripts/debian13-bootstrap.sh
 #
-# 所有步骤都按“可重复执行”设计：如果中途断开或主动 Ctrl-C，再运行一次
-# 会先清理受管临时文件、修复 dpkg/apt 的半配置状态，再继续完成剩余配置。
+# 中断后再次运行时，脚本会清理受管临时文件、恢复 dpkg/apt 半配置状态，
+# 然后继续完成剩余配置。
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -84,8 +82,12 @@ APT_GET=(
   -o DPkg::Lock::Timeout=120
 )
 
+log_location() {
+  hostname 2>/dev/null || printf 'unknown'
+}
+
 log() {
-  printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
+  printf '[%s] INFO：%s 在 %s 执行：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*"
 }
 
 enabled_label() {
@@ -113,11 +115,11 @@ ssh_password_login_label() {
 }
 
 warn() {
-  printf '[%s] 警告：%s\n' "$SCRIPT_NAME" "$*" >&2
+  printf '[%s] WARN：%s 在 %s 执行时提示：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
 }
 
 die() {
-  printf '[%s] 错误：%s\n' "$SCRIPT_NAME" "$*" >&2
+  printf '[%s] ERROR：%s 在 %s 执行脚本时发生错误：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
   exit 1
 }
 
@@ -165,7 +167,7 @@ on_error() {
   local failed_command="${2:-未知命令}"
 
   [[ "$exit_code" -eq 0 ]] && return 0
-  warn "第 ${line_no} 行执行失败：${failed_command}"
+  warn "第 ${line_no} 行执行命令失败：${failed_command}；请查看上方命令输出。"
   exit "$exit_code"
 }
 
@@ -353,7 +355,7 @@ recover_sshd_if_needed() {
   else
     warn "检测到上次 SSH 配置未完成且当前 sshd 配置无效，开始回滚受管 drop-in。"
     rollback_sshd_dropin
-    test_sshd_config || die "回滚后 sshd 配置仍然无效，请手工检查 /etc/ssh。"
+    test_sshd_config || die "回滚本脚本管理的 SSH drop-in 后，sshd 配置仍然无效；请检查 /etc/ssh/sshd_config 和 /etc/ssh/sshd_config.d/ 中的非本脚本配置。"
   fi
 
   rm -f -- "$SSHD_CHANGE_IN_PROGRESS" "$SSHD_DROPIN_BACKUP" "$SSHD_DROPIN_HAD_BACKUP"
@@ -739,7 +741,7 @@ configure_sshd() {
     warn "新的 SSH 配置未通过校验，回滚受管 drop-in。"
     rollback_sshd_dropin
     finish_sshd_change
-    die "sshd 配置校验失败。"
+    die "写入 $SSHD_DROPIN 后 sshd 配置校验失败；脚本已回滚受管 drop-in，请运行 sshd -t 检查 /etc/ssh/sshd_config 和 /etc/ssh/sshd_config.d/。"
   fi
 
   reload_ssh_service
@@ -948,7 +950,7 @@ configure_swapfile() {
   swap_dir="$(dirname "$BOOTSTRAP_SWAPFILE")"
   install -d -o root -g root -m 0755 "$swap_dir"
   available_mb="$(df -Pm "$swap_dir" | awk 'NR == 2 { print $4 }')"
-  ((available_mb > size_mb + 256)) || die "磁盘空间不足，无法创建 ${size_mb}M swapfile。"
+  ((available_mb > size_mb + 256)) || die "磁盘空间不足，无法在 ${swap_dir} 创建 ${size_mb}M swapfile；请运行 df -h ${swap_dir} 检查可用空间。"
 
   # 从这里开始写入 in-progress 标记。若 fallocate/dd/mkswap/swapon 期间中断，
   # 下次运行会根据这个标记清理未完成的受管 swapfile，然后重新创建。
@@ -968,7 +970,7 @@ configure_swapfile() {
 
 enable_core_services() {
   log "启动基础服务。"
-  systemctl enable --now chrony >/dev/null 2>&1 || warn "chrony 启用失败，请稍后手工检查。"
+  systemctl enable --now chrony >/dev/null 2>&1 || warn "systemctl 在本机启用 chrony.service 时失败；请运行 systemctl status chrony.service 查看服务错误。"
   systemctl enable --now ssh >/dev/null 2>&1 || true
 }
 
