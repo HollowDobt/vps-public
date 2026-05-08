@@ -45,7 +45,7 @@ readonly SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
 # 默认值尽量贴合新 VPS 的基础使用场景：hollow 是主账号，SSH 端口默认 22。
 # 只有找到可用登录密钥并写入 root 与 hollow 后，才会启用仅密钥 SSH 登录策略。
 BOOTSTRAP_USER="${BOOTSTRAP_USER:-hollow}"
-BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-}"
+BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-${VPS_NODE_NAME:-}}"
 BOOTSTRAP_TIMEZONE="${BOOTSTRAP_TIMEZONE:-Asia/Shanghai}"
 BOOTSTRAP_LOCALE="${BOOTSTRAP_LOCALE:-en_US.UTF-8}"
 BOOTSTRAP_EXTRA_LOCALES="${BOOTSTRAP_EXTRA_LOCALES:-zh_CN.UTF-8}"

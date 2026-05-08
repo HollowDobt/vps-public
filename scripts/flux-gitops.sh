@@ -18,29 +18,7 @@ readonly STATE_DIR="/var/lib/hlwdot/flux-gitops"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-FLUX_GITHUB_HOSTNAME="${FLUX_GITHUB_HOSTNAME:-github.com}"
-FLUX_GITHUB_OWNER="${FLUX_GITHUB_OWNER:-}"
-FLUX_GITHUB_REPO="${FLUX_GITHUB_REPO:-vps-gitops}"
-FLUX_GITHUB_BRANCH="${FLUX_GITHUB_BRANCH:-main}"
-FLUX_GITHUB_PRIVATE="${FLUX_GITHUB_PRIVATE:-1}"
-FLUX_GITHUB_PERSONAL="${FLUX_GITHUB_PERSONAL:-1}"
-FLUX_GIT_AUTH="${FLUX_GIT_AUTH:-ssh}"
-FLUX_GIT_URL="${FLUX_GIT_URL:-}"
-FLUX_GIT_SSH_KEY_FILE="${FLUX_GIT_SSH_KEY_FILE:-/etc/fluxcd/github-deploy.key}"
-FLUX_CLUSTER_NAME="${FLUX_CLUSTER_NAME:-}"
-FLUX_GITHUB_PATH="${FLUX_GITHUB_PATH:-}"
-FLUX_COMPONENTS_EXTRA="${FLUX_COMPONENTS_EXTRA:-}"
-FLUX_REPO_SCAFFOLD="${FLUX_REPO_SCAFFOLD:-1}"
-FLUX_AGE_KEY_FILE="${FLUX_AGE_KEY_FILE:-/etc/fluxcd/sops-age.agekey}"
-FLUX_AGE_PUBLIC_KEY="${FLUX_AGE_PUBLIC_KEY:-}"
-FLUX_INTERVAL="${FLUX_INTERVAL:-10m0s}"
-FLUX_RETRY_INTERVAL="${FLUX_RETRY_INTERVAL:-1m0s}"
-FLUX_TIMEOUT="${FLUX_TIMEOUT:-5m0s}"
-FLUX_FORGET_GITHUB_TOKEN="${FLUX_FORGET_GITHUB_TOKEN:-1}"
-GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-K3S_NODE_NAME="${K3S_NODE_NAME:-}"
-HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
-BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-}"
+apply_vps_defaults flux-gitops
 
 KUBECTL=()
 AGE_PUBLIC_KEY=''
@@ -678,24 +656,8 @@ print_summary() {
 }
 
 main() {
-  case "${1:-}" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    '')
-      ;;
-    *)
-      usage
-      die "未知参数：$1"
-      ;;
-  esac
-
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  parse_noarg_or_help "$@"
+  prepare_vps_run
   resolve_defaults
   validate_input
   detect_kubectl

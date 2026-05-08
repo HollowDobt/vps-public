@@ -831,7 +831,7 @@ check_swap() {
 }
 
 check_hostname() {
-  local expected="${VERIFY_HOSTNAME:-${BOOTSTRAP_HOSTNAME:-}}"
+  local expected="${VERIFY_HOSTNAME:-${BOOTSTRAP_HOSTNAME:-${VPS_NODE_NAME:-}}}"
   local current
 
   [[ -n "$expected" ]] || {

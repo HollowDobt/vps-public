@@ -51,6 +51,260 @@ validate_bool() {
   esac
 }
 
+env_default() {
+  local name="$1"
+  local value="${2:-}"
+
+  if [[ -z "${!name+x}" ]]; then
+    printf -v "$name" '%s' "$value"
+  elif [[ -z "${!name}" ]]; then
+    printf -v "$name" '%s' "$value"
+  fi
+}
+
+apply_vps_defaults() {
+  local group
+
+  for group in "$@"; do
+    case "$group" in
+      identity)
+        env_default VPS_NODE_NAME ''
+        env_default BOOTSTRAP_HOSTNAME ''
+        env_default HEADSCALE_CLIENT_HOSTNAME ''
+        env_default K3S_NODE_NAME ''
+        ;;
+      hollow-net)
+        env_default HOLLOW_NET_IFACE hollow-net
+        env_default HOLLOW_NET_UFW_ALLOW 1
+        ;;
+      headscale-endpoint)
+        env_default HEADSCALE_SERVER_URL ''
+        env_default HEADSCALE_SERVER_HOSTNAME ''
+        ;;
+      headscale-authkey)
+        env_default HEADSCALE_USER hollow
+        env_default HEADSCALE_PREAUTH_REUSABLE 0
+        env_default HEADSCALE_PREAUTH_EXPIRATION 24h
+        ;;
+      headscale-client)
+        apply_vps_defaults identity hollow-net headscale-endpoint
+        env_default HEADSCALE_AUTHKEY ''
+        env_default HEADSCALE_ACCEPT_DNS true
+        env_default HEADSCALE_ADVERTISE_ROUTES ''
+        env_default HEADSCALE_ADVERTISE_EXIT_NODE 0
+        env_default HEADSCALE_ENABLE_TS_SSH 0
+        env_default HEADSCALE_RESET 0
+        env_default HEADSCALE_EXTRA_UP_ARGS ''
+        env_default HEADSCALE_ENDPOINT_CHECK 1
+        env_default HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC 15
+        env_default HEADSCALE_CLIENT_UP_TIMEOUT_SEC 120
+        ;;
+      headscale-server)
+        apply_vps_defaults headscale-authkey headscale-endpoint
+        env_default HEADSCALE_VERSION stable
+        env_default HEADSCALE_LISTEN_ADDR 127.0.0.1:8080
+        env_default HEADSCALE_METRICS_LISTEN_ADDR 127.0.0.1:9090
+        env_default HEADSCALE_GRPC_LISTEN_ADDR 127.0.0.1:50443
+        env_default HEADSCALE_DNS_BASE_DOMAIN auto
+        env_default HEADSCALE_CREATE_PREAUTHKEY 0
+        env_default HEADSCALE_CONFIG_APPEND_FILE ''
+        env_default HEADSCALE_UFW_ALLOW 0
+        env_default HEADSCALE_UFW_PORTS 8080/tcp
+        env_default HEADSCALE_ENABLE_CADDY auto
+        env_default HEADSCALE_CADDYFILE /etc/caddy/Caddyfile
+        env_default HEADSCALE_CADDY_EMAIL ''
+        env_default HEADSCALE_CADDY_UFW_ALLOW 1
+        env_default HEADSCALE_CADDY_VERIFY 1
+        env_default HEADSCALE_CADDY_VERIFY_TIMEOUT_SEC 120
+        env_default HEADSCALE_CADDY_REPAIR_CERT_CACHE 1
+        env_default HEADSCALE_EXCLUSIVE_PUBLIC_PORTS 1
+        env_default HEADSCALE_DISABLE_K3S_CONFLICTS 1
+        env_default CLOUDFLARE_HEADSCALE_DNS 1
+        env_default CLOUDFLARE_DNS_TARGET_IPV4 auto
+        env_default CLOUDFLARE_DNS_TTL 120
+        ;;
+      headscale-main-node)
+        apply_vps_defaults identity headscale-endpoint
+        env_default HEADSCALE_MAIN_JOIN_SELF 1
+        ;;
+      k3s-common)
+        apply_vps_defaults identity hollow-net
+        env_default K3S_VERSION ''
+        env_default K3S_TOKEN ''
+        env_default K3S_AGENT_TOKEN ''
+        env_default K3S_NODE_IP ''
+        env_default K3S_FLANNEL_IFACE ''
+        env_default K3S_SERVER_HOSTNAME ''
+        env_default K3S_SERVER_URL ''
+        env_default K3S_API_PORT 6443
+        env_default K3S_UFW_ALLOW 1
+        env_default K3S_UFW_INTERFACE ''
+        ;;
+      k3s-server)
+        apply_vps_defaults k3s-common
+        env_default K3S_CLUSTER_INIT 1
+        env_default K3S_ADVERTISE_ADDRESS ''
+        env_default K3S_CLUSTER_CIDR 10.42.0.0/16
+        env_default K3S_SERVICE_CIDR 10.43.0.0/16
+        env_default K3S_DISABLE_COMPONENTS ''
+        env_default K3S_KUBECONFIG_MODE 0600
+        env_default K3S_ETCD_SNAPSHOT_SCHEDULE '0 */12 * * *'
+        env_default K3S_ETCD_SNAPSHOT_RETENTION 5
+        env_default K3S_ETCD_SNAPSHOT_COMPRESS 1
+        env_default K3S_SERVER_EXTRA_ARGS ''
+        env_default K3S_UFW_ALLOW_ETCD 0
+        env_default CLOUDFLARE_K3S_DNS_NAMES ''
+        env_default CLOUDFLARE_DNS_PROXIED 0
+        env_default CLOUDFLARE_DNS_TTL 120
+        ;;
+      k3s-agent)
+        apply_vps_defaults k3s-common
+        env_default K3S_AGENT_EXTRA_ARGS ''
+        ;;
+      k3s-main-node)
+        apply_vps_defaults identity hollow-net
+        env_default K3S_MAIN_ENABLE_FLUX 1
+        ;;
+      k3s-worker-node)
+        apply_vps_defaults identity hollow-net
+        ;;
+      k3s-worker-full-node)
+        apply_vps_defaults identity headscale-endpoint
+        env_default K3S_WORKER_FULL_RUN_BOOTSTRAP 1
+        env_default K3S_WORKER_FULL_RUN_CHECK 1
+        env_default K3S_WORKER_FULL_RUN_HEADSCALE 1
+        env_default HEADSCALE_AUTHKEY ''
+        ;;
+      flux-gitops)
+        apply_vps_defaults identity
+        env_default FLUX_GITHUB_HOSTNAME github.com
+        env_default FLUX_GITHUB_OWNER ''
+        env_default FLUX_GITHUB_REPO vps-gitops
+        env_default FLUX_GITHUB_BRANCH main
+        env_default FLUX_GITHUB_PRIVATE 1
+        env_default FLUX_GITHUB_PERSONAL 1
+        env_default FLUX_GIT_AUTH ssh
+        env_default FLUX_GIT_URL ''
+        env_default FLUX_GIT_SSH_KEY_FILE /etc/fluxcd/github-deploy.key
+        env_default FLUX_CLUSTER_NAME ''
+        env_default FLUX_GITHUB_PATH ''
+        env_default FLUX_COMPONENTS_EXTRA ''
+        env_default FLUX_REPO_SCAFFOLD 1
+        env_default FLUX_AGE_KEY_FILE /etc/fluxcd/sops-age.agekey
+        env_default FLUX_AGE_PUBLIC_KEY ''
+        env_default FLUX_INTERVAL 10m0s
+        env_default FLUX_RETRY_INTERVAL 1m0s
+        env_default FLUX_TIMEOUT 5m0s
+        env_default FLUX_FORGET_GITHUB_TOKEN 1
+        env_default GITHUB_TOKEN "${GH_TOKEN:-}"
+        ;;
+      cloudflare-dns)
+        apply_vps_defaults headscale-endpoint
+        env_default CLOUDFLARE_DNS_TARGET_IPV4 auto
+        env_default CLOUDFLARE_DNS_PROXIED 0
+        env_default CLOUDFLARE_DNS_TTL 120
+        env_default CLOUDFLARE_HEADSCALE_DNS 1
+        env_default CLOUDFLARE_K3S_DNS_TARGET tailnet
+        env_default CLOUDFLARE_K3S_DNS_NAMES ''
+        ;;
+      *)
+        die "未知默认配置组：$group"
+        ;;
+    esac
+  done
+}
+
+parse_noarg_or_help() {
+  case "${1:-}" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    '')
+      ;;
+    *)
+      usage
+      die "未知参数：$1"
+      ;;
+  esac
+}
+
+prepare_vps_run() {
+  require_root
+  setup_state_dir
+  install_traps
+  load_env
+  recover_previous_run
+}
+
+script_path() {
+  printf '%s/%s\n' "$SCRIPT_DIR" "$1"
+}
+
+run_child() {
+  local label="$1"
+  local file="$2"
+
+  [[ -r "$file" ]] || die "找不到脚本：$file"
+  log "开始：$label"
+  bash "$file"
+  log "完成：$label"
+}
+
+reload_system_env() {
+  [[ -r /etc/hlwdot/vps.env ]] || return 0
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/hlwdot/vps.env
+  set +a
+}
+
+tailnet_already_up() {
+  command_exists tailscale || return 1
+  tailscale status --self >/dev/null 2>&1 || return 1
+  [[ -n "$(tailscale_ipv4)" ]]
+}
+
+node_identity_name() {
+  local fallback="$1"
+
+  if [[ -n "${BOOTSTRAP_HOSTNAME:-}" ]]; then
+    printf '%s\n' "$BOOTSTRAP_HOSTNAME"
+  elif [[ -n "${VPS_NODE_NAME:-}" ]]; then
+    printf '%s\n' "$VPS_NODE_NAME"
+  else
+    hostname -s 2>/dev/null || hostname 2>/dev/null || printf '%s\n' "$fallback"
+  fi
+}
+
+derive_node_identity_defaults() {
+  local fallback="$1"
+
+  if [[ -z "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
+    HEADSCALE_CLIENT_HOSTNAME="$(node_identity_name "$fallback")"
+  fi
+  if [[ -z "$K3S_NODE_NAME" ]]; then
+    K3S_NODE_NAME="$HEADSCALE_CLIENT_HOSTNAME"
+  fi
+  if [[ -z "$BOOTSTRAP_HOSTNAME" ]]; then
+    BOOTSTRAP_HOSTNAME="$HEADSCALE_CLIENT_HOSTNAME"
+  fi
+}
+
+persist_node_identity_defaults() {
+  persist_env_value HEADSCALE_CLIENT_HOSTNAME "$HEADSCALE_CLIENT_HOSTNAME"
+  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
+  persist_env_value BOOTSTRAP_HOSTNAME "$BOOTSTRAP_HOSTNAME"
+}
+
+log_tailnet_ready() {
+  local tailnet_ip
+  local iface="${HOLLOW_NET_IFACE:-hollow-net}"
+
+  tailnet_ip="$(require_tailnet_ready)"
+  log "Headscale 网络已就绪：${iface} ${tailnet_ip}"
+}
+
 setup_state_dir() {
   install -d -o root -g root -m 0755 "$STATE_DIR"
   install -d -o root -g root -m 0700 "${STATE_DIR}/tmp"

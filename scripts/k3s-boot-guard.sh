@@ -57,11 +57,7 @@ main() {
       ;;
   esac
 
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  prepare_vps_run
   [[ "${#services[@]}" -gt 0 ]] || die "未检测到 k3s 或 k3s-agent 服务。"
 
   begin_run

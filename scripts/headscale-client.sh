@@ -21,22 +21,7 @@ readonly TAILSCALED_OVERRIDE="/etc/systemd/system/tailscaled.service.d/10-hlwdot
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-}"
-HEADSCALE_SERVER_HOSTNAME="${HEADSCALE_SERVER_HOSTNAME:-}"
-HEADSCALE_AUTHKEY="${HEADSCALE_AUTHKEY:-}"
-HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
-HEADSCALE_ACCEPT_DNS="${HEADSCALE_ACCEPT_DNS:-true}"
-HEADSCALE_ADVERTISE_ROUTES="${HEADSCALE_ADVERTISE_ROUTES:-}"
-HEADSCALE_ADVERTISE_EXIT_NODE="${HEADSCALE_ADVERTISE_EXIT_NODE:-0}"
-HEADSCALE_ENABLE_TS_SSH="${HEADSCALE_ENABLE_TS_SSH:-0}"
-HEADSCALE_RESET="${HEADSCALE_RESET:-0}"
-HEADSCALE_EXTRA_UP_ARGS="${HEADSCALE_EXTRA_UP_ARGS:-}"
-HEADSCALE_ENDPOINT_CHECK="${HEADSCALE_ENDPOINT_CHECK:-1}"
-HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC="${HEADSCALE_ENDPOINT_CHECK_TIMEOUT_SEC:-15}"
-HEADSCALE_CLIENT_UP_TIMEOUT_SEC="${HEADSCALE_CLIENT_UP_TIMEOUT_SEC:-120}"
-HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
-HOLLOW_NET_UFW_ALLOW="${HOLLOW_NET_UFW_ALLOW:-1}"
-K3S_NODE_NAME="${K3S_NODE_NAME:-}"
+apply_vps_defaults headscale-client
 
 usage() {
   cat <<EOF
@@ -90,7 +75,7 @@ resolve_server_url() {
 
 apply_defaults() {
   if [[ -z "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
-    HEADSCALE_CLIENT_HOSTNAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'vps')"
+    HEADSCALE_CLIENT_HOSTNAME="$(node_identity_name vps)"
   fi
   if [[ -z "$K3S_NODE_NAME" ]]; then
     K3S_NODE_NAME="$HEADSCALE_CLIENT_HOSTNAME"
@@ -155,12 +140,6 @@ configure_tailscaled_interface() {
 start_tailscaled() {
   systemctl enable tailscaled >/dev/null 2>&1 || true
   systemctl restart tailscaled
-}
-
-tailnet_already_up() {
-  command_exists tailscale || return 1
-  tailscale status --self >/dev/null 2>&1 || return 1
-  [[ -n "$(tailscale_ipv4)" ]]
 }
 
 headscale_key_url() {
@@ -315,24 +294,8 @@ print_summary() {
 }
 
 main() {
-  case "${1:-}" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    '')
-      ;;
-    *)
-      usage
-      die "未知参数：$1"
-      ;;
-  esac
-
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  parse_noarg_or_help "$@"
+  prepare_vps_run
   resolve_server_url
   apply_defaults
   validate_input

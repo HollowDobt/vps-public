@@ -18,9 +18,7 @@ readonly STATE_DIR="/var/lib/hlwdot/k3s-worker-node"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
-K3S_NODE_NAME="${K3S_NODE_NAME:-}"
-BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-}"
+apply_vps_defaults k3s-worker-node
 
 usage() {
   cat <<EOF
@@ -35,69 +33,21 @@ usage() {
 EOF
 }
 
-script_path() {
-  printf '%s/%s\n' "$SCRIPT_DIR" "$1"
-}
-
-run_child() {
-  local label="$1"
-  local file="$2"
-
-  [[ -r "$file" ]] || die "找不到脚本：$file"
-  log "开始：$label"
-  bash "$file"
-  log "完成：$label"
-}
-
 derive_defaults() {
-  if [[ -z "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
-    if [[ -n "$BOOTSTRAP_HOSTNAME" ]]; then
-      HEADSCALE_CLIENT_HOSTNAME="$BOOTSTRAP_HOSTNAME"
-    else
-      HEADSCALE_CLIENT_HOSTNAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'k3s-worker')"
-    fi
-  fi
-  if [[ -z "$K3S_NODE_NAME" ]]; then
-    K3S_NODE_NAME="$HEADSCALE_CLIENT_HOSTNAME"
-  fi
-  if [[ -z "$BOOTSTRAP_HOSTNAME" ]]; then
-    BOOTSTRAP_HOSTNAME="$HEADSCALE_CLIENT_HOSTNAME"
-  fi
+  derive_node_identity_defaults k3s-worker
 }
 
 persist_defaults() {
-  persist_env_value HEADSCALE_CLIENT_HOSTNAME "$HEADSCALE_CLIENT_HOSTNAME"
-  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
-  persist_env_value BOOTSTRAP_HOSTNAME "$BOOTSTRAP_HOSTNAME"
+  persist_node_identity_defaults
 }
 
 check_headscale_dependency() {
-  local tailnet_ip
-  local iface="${HOLLOW_NET_IFACE:-hollow-net}"
-
-  tailnet_ip="$(require_tailnet_ready)"
-  log "Headscale 网络已就绪：${iface} ${tailnet_ip}"
+  log_tailnet_ready
 }
 
 main() {
-  case "${1:-}" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    '')
-      ;;
-    *)
-      usage
-      die "未知参数：$1"
-      ;;
-  esac
-
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  parse_noarg_or_help "$@"
+  prepare_vps_run
   derive_defaults
   begin_run
   persist_env_file

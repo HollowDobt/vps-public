@@ -28,24 +28,44 @@ MENU_LABELS=(
   "部署 NodeGet hollow-net 探针页"
   "退出"
 )
-MENU_GROUPS=(
-  "系统重装"
-  "初始化配置"
-  "初始化配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
-  "并入集群配置"
+# 面板按操作系统 -> 功能子类 分段。
+MENU_OS_GROUPS=(
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Alpine 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Debian 系统"
+  "Alpine 系统"
+  ""
 )
+MENU_SUBGROUPS=(
+  "系统准备"
+  "系统准备"
+  "系统准备"
+  "Headscale"
+  "Headscale"
+  "Headscale"
+  "Headscale"
+  "k3s"
+  "k3s"
+  "k3s"
+  "k3s"
+  "k3s"
+  "Headscale"
+  "k3s"
+  "NodeGet"
+  ""
+)
+MENU_DISPLAY_ORDER=(0 1 2 3 4 5 12 7 8 9 10 11 13 6 14 15)
 MENU_HINTS=(
   "启动 Debian 13 重装"
   "首次配置并立即校验"
@@ -55,13 +75,13 @@ MENU_HINTS=(
   "当前节点加入 Headscale 网络"
   "接入 Headscale 网络，可上报分流路由"
   "检查 Headscale 网络，部署 server、记录 token、部署 GitOps"
-  "建议先执行系统重装；初始化、接入 Headscale 网络、部署 k3s 子节点"
+  "新 VPS 子节点流程：重装、初始化、Headscale 接入、k3s agent"
   "检查 Headscale 网络，部署 agent"
   "安装 Flux 控制面"
   "输出 worker 接入 token"
   "加密并上传 Headscale 状态"
   "加密并上传 k3s/Flux 状态"
-  "Alpine NAT LXC：NodeGet Server + StatusShow + Cloudflare Tunnel"
+  "Alpine NAT LXC：NodeGet Server、StatusShow、Cloudflare Tunnel"
   "返回 shell"
 )
 MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "f" "0")
@@ -69,6 +89,8 @@ MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-a
 
 ITEM_LINES=()
 MENU_END_LINE=1
+MENU_HINT_LINE=1
+MENU_ORDER_POS=()
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'
@@ -102,7 +124,16 @@ cursor_show() {
   printf '\033[?25h\033[0m'
 }
 
+terminal_wrap_off() {
+  printf '\033[?7l'
+}
+
+terminal_wrap_on() {
+  printf '\033[?7h'
+}
+
 cleanup_terminal() {
+  terminal_wrap_on
   cursor_show
 }
 
@@ -119,6 +150,34 @@ header_rows() {
   else
     printf '1\n'
   fi
+}
+
+build_menu_order_index() {
+  local position
+  local index
+
+  for position in "${!MENU_DISPLAY_ORDER[@]}"; do
+    index="${MENU_DISPLAY_ORDER[$position]}"
+    MENU_ORDER_POS[$index]="$position"
+  done
+}
+
+menu_prev_index() {
+  local index="$1"
+  local position="${MENU_ORDER_POS[$index]}"
+  local count="${#MENU_DISPLAY_ORDER[@]}"
+
+  position=$(((position + count - 1) % count))
+  printf '%s\n' "${MENU_DISPLAY_ORDER[$position]}"
+}
+
+menu_next_index() {
+  local index="$1"
+  local position="${MENU_ORDER_POS[$index]}"
+  local count="${#MENU_DISPLAY_ORDER[@]}"
+
+  position=$(((position + 1) % count))
+  printf '%s\n' "${MENU_DISPLAY_ORDER[$position]}"
 }
 
 script_path() {
@@ -204,48 +263,112 @@ print_header() {
   printf '%s%s%s\n\n' "$C_DIM" "$(hostname 2>/dev/null || printf 'unknown')" "$C_RESET"
 }
 
+item_indent() {
+  local index="$1"
+  if [[ -z "${MENU_OS_GROUPS[$index]}" && -z "${MENU_SUBGROUPS[$index]}" ]]; then
+    printf '    '
+    return
+  fi
+
+  printf '        '
+}
+
+print_item_line() {
+  local index="$1"
+  local selected="$2"
+  local indent
+
+  indent="$(item_indent "$index")"
+  if [[ "$selected" == "1" ]]; then
+    printf '%s%s%s> %s  %s%s' "$indent" "$C_REV" "$C_BOLD" "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}" "$C_RESET"
+  else
+    printf '%s%s  %s' "$indent" "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}"
+  fi
+}
+
+print_selected_hint() {
+  local index="$1"
+
+  printf '  %s当前：%s%s' "$C_DIM" "${MENU_HINTS[$index]}" "$C_RESET"
+}
+
 print_item() {
   local index="$1"
   local selected="$2"
 
-  if [[ "$selected" == "1" ]]; then
-    printf '  %s%s> %s  %s%s\n' "$C_REV" "$C_BOLD" "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}" "$C_RESET"
-    printf '     %s%s%s\n' "$C_DIM" "${MENU_HINTS[$index]}" "$C_RESET"
-  else
-    printf '    %s  %s\n' "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}"
-    printf '     %s%s%s\n' "$C_DIM" "${MENU_HINTS[$index]}" "$C_RESET"
-  fi
+  print_item_line "$index" "$selected"
+  printf '\n'
 }
 
 draw_menu() {
   local selected="$1"
+  local position
   local i
-  local current_group='__none__'
+  local current_os='__none__'
+  local current_subgroup='__none__'
   local line
+  local os_label
+  local subgroup_label
+  local printed_any=0
 
   ITEM_LINES=()
   line=1
 
-  printf '\033[2J\033[H'
+  terminal_wrap_off
+  printf '\033[H\033[2J'
   print_header
   line=$((line + $(header_rows) + 2))
 
   printf '%s↑/↓ 移动，Enter 执行，数字/字母直达，q 退出%s\n\n' "$C_DIM" "$C_RESET"
   line=$((line + 2))
 
-  for i in "${!MENU_LABELS[@]}"; do
-    if [[ "${MENU_GROUPS[$i]}" != "$current_group" ]]; then
-      current_group="${MENU_GROUPS[$i]}"
-      printf '  %s%s%s\n' "$C_CYAN" "$current_group" "$C_RESET"
+  for position in "${!MENU_DISPLAY_ORDER[@]}"; do
+    i="${MENU_DISPLAY_ORDER[$position]}"
+    os_label="${MENU_OS_GROUPS[$i]}"
+    subgroup_label="${MENU_SUBGROUPS[$i]}"
+
+    if [[ -z "$os_label" && -z "$subgroup_label" ]]; then
+      [[ "$printed_any" == "1" ]] && {
+        printf '\n'
+        line=$((line + 1))
+      }
+      ITEM_LINES[$i]="$line"
+      print_item "$i" "$([[ "$i" == "$selected" ]] && printf 1 || printf 0)"
+      line=$((line + 1))
+      printed_any=1
+      continue
+    fi
+
+    if [[ "$os_label" != "$current_os" ]]; then
+      [[ "$printed_any" == "1" ]] && {
+        printf '\n'
+        line=$((line + 1))
+      }
+      current_os="$os_label"
+      current_subgroup='__none__'
+      printf '  %s%s%s\n' "$C_CYAN" "$current_os" "$C_RESET"
       line=$((line + 1))
     fi
+
+    if [[ "$subgroup_label" != "$current_subgroup" ]]; then
+      current_subgroup="$subgroup_label"
+      printf '    %s%s%s\n' "$C_BOLD" "$current_subgroup" "$C_RESET"
+      line=$((line + 1))
+    fi
+
     ITEM_LINES[$i]="$line"
     print_item "$i" "$([[ "$i" == "$selected" ]] && printf 1 || printf 0)"
-    line=$((line + 2))
+    line=$((line + 1))
+    printed_any=1
   done
 
-  MENU_END_LINE="$line"
   printf '\n'
+  line=$((line + 1))
+  MENU_HINT_LINE="$line"
+  print_selected_hint "$selected"
+  printf '\n'
+  line=$((line + 1))
+  MENU_END_LINE="$line"
   printf '\033[%d;1H' "$MENU_END_LINE"
 }
 
@@ -254,19 +377,23 @@ repaint_item() {
   local selected="$2"
   local line="${ITEM_LINES[$index]}"
 
+  terminal_wrap_off
   printf '\033[%d;1H\033[2K' "$line"
-  if [[ "$selected" == "1" ]]; then
-    printf '  %s%s> %s  %s%s' "$C_REV" "$C_BOLD" "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}" "$C_RESET"
-  else
-    printf '    %s  %s' "${MENU_KEYS[$index]}" "${MENU_LABELS[$index]}"
-  fi
+  print_item_line "$index" "$selected"
+  printf '\033[%d;1H' "$MENU_END_LINE"
+}
 
-  printf '\033[%d;1H\033[2K' "$((line + 1))"
-  printf '     %s%s%s' "$C_DIM" "${MENU_HINTS[$index]}" "$C_RESET"
+repaint_selected_hint() {
+  local index="$1"
+
+  terminal_wrap_off
+  printf '\033[%d;1H\033[2K' "$MENU_HINT_LINE"
+  print_selected_hint "$index"
   printf '\033[%d;1H' "$MENU_END_LINE"
 }
 
 prepare_action_area() {
+  terminal_wrap_on
   printf '\033[%d;1H\033[J' "$MENU_END_LINE"
 }
 
@@ -479,13 +606,13 @@ run_selected_action() {
 main() {
   local selected=0
   local key=''
-  local menu_count="${#MENU_LABELS[@]}"
   local action_status=0
   local old_selected=0
   local i
   local matched=0
 
   need_tty
+  build_menu_order_index
   trap cleanup_terminal EXIT
   trap 'cleanup_terminal; exit 130' INT TERM
   cursor_hide
@@ -497,15 +624,17 @@ main() {
     case "$key" in
       $'\e[A' | k | K)
         old_selected="$selected"
-        selected=$(((selected + menu_count - 1) % menu_count))
+        selected="$(menu_prev_index "$selected")"
         repaint_item "$old_selected" 0
         repaint_item "$selected" 1
+        repaint_selected_hint "$selected"
         ;;
       $'\e[B' | j | J)
         old_selected="$selected"
-        selected=$(((selected + 1) % menu_count))
+        selected="$(menu_next_index "$selected")"
         repaint_item "$old_selected" 0
         repaint_item "$selected" 1
+        repaint_selected_hint "$selected"
         ;;
       '')
         action_status=0

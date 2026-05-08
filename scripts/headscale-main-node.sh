@@ -19,12 +19,7 @@ readonly STATE_DIR="/var/lib/hlwdot/headscale-main-node"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-HEADSCALE_MAIN_JOIN_SELF="${HEADSCALE_MAIN_JOIN_SELF:-1}"
-HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
-K3S_NODE_NAME="${K3S_NODE_NAME:-}"
-BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-}"
-HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-}"
-HEADSCALE_SERVER_HOSTNAME="${HEADSCALE_SERVER_HOSTNAME:-}"
+apply_vps_defaults headscale-main-node
 
 usage() {
   cat <<EOF
@@ -40,50 +35,10 @@ usage() {
 EOF
 }
 
-script_path() {
-  printf '%s/%s\n' "$SCRIPT_DIR" "$1"
-}
-
-run_child() {
-  local label="$1"
-  local file="$2"
-
-  [[ -r "$file" ]] || die "找不到脚本：$file"
-  log "开始：$label"
-  bash "$file"
-  log "完成：$label"
-}
-
-reload_system_env() {
-  [[ -r /etc/hlwdot/vps.env ]] || return 0
-  set -a
-  # shellcheck disable=SC1091
-  . /etc/hlwdot/vps.env
-  set +a
-}
-
-tailnet_already_up() {
-  command_exists tailscale || return 1
-  tailscale status --self >/dev/null 2>&1 || return 1
-  [[ -n "$(tailscale_ipv4)" ]]
-}
-
 derive_defaults() {
   local host
 
-  if [[ -z "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
-    if [[ -n "$BOOTSTRAP_HOSTNAME" ]]; then
-      HEADSCALE_CLIENT_HOSTNAME="$BOOTSTRAP_HOSTNAME"
-    else
-      HEADSCALE_CLIENT_HOSTNAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'server')"
-    fi
-  fi
-  if [[ -z "$K3S_NODE_NAME" ]]; then
-    K3S_NODE_NAME="$HEADSCALE_CLIENT_HOSTNAME"
-  fi
-  if [[ -z "$BOOTSTRAP_HOSTNAME" ]]; then
-    BOOTSTRAP_HOSTNAME="$HEADSCALE_CLIENT_HOSTNAME"
-  fi
+  derive_node_identity_defaults server
 
   case "$HEADSCALE_SERVER_URL" in
     '' | auto | https://headscale.example.com | http://headscale.example.com)
@@ -101,9 +56,7 @@ derive_defaults() {
 }
 
 persist_defaults() {
-  persist_env_value HEADSCALE_CLIENT_HOSTNAME "$HEADSCALE_CLIENT_HOSTNAME"
-  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
-  persist_env_value BOOTSTRAP_HOSTNAME "$BOOTSTRAP_HOSTNAME"
+  persist_node_identity_defaults
   persist_env_value HEADSCALE_SERVER_URL "$HEADSCALE_SERVER_URL"
 }
 
@@ -113,24 +66,8 @@ validate_input() {
 }
 
 main() {
-  case "${1:-}" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    '')
-      ;;
-    *)
-      usage
-      die "未知参数：$1"
-      ;;
-  esac
-
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  parse_noarg_or_help "$@"
+  prepare_vps_run
   derive_defaults
   validate_input
   begin_run

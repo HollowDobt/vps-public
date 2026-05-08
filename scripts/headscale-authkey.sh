@@ -17,9 +17,7 @@ readonly STATE_DIR="/var/lib/hlwdot/headscale-authkey"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-HEADSCALE_USER="${HEADSCALE_USER:-hollow}"
-HEADSCALE_PREAUTH_REUSABLE="${HEADSCALE_PREAUTH_REUSABLE:-0}"
-HEADSCALE_PREAUTH_EXPIRATION="${HEADSCALE_PREAUTH_EXPIRATION:-24h}"
+apply_vps_defaults headscale-authkey
 
 usage() {
   cat <<EOF
@@ -97,24 +95,8 @@ create_key() {
 }
 
 main() {
-  case "${1:-}" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    '')
-      ;;
-    *)
-      usage
-      die "未知参数：$1"
-      ;;
-  esac
-
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  parse_noarg_or_help "$@"
+  prepare_vps_run
   begin_run
   persist_env_file
   validate_input

@@ -29,24 +29,8 @@ EOF
 main() {
   local token=''
 
-  case "${1:-}" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    '')
-      ;;
-    *)
-      usage
-      die "未知参数：$1"
-      ;;
-  esac
-
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  parse_noarg_or_help "$@"
+  prepare_vps_run
   begin_run
 
   if [[ -r /var/lib/rancher/k3s/server/node-token ]]; then

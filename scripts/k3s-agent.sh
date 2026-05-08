@@ -18,20 +18,7 @@ readonly K3S_CONFIG="/etc/rancher/k3s/config.yaml"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-K3S_VERSION="${K3S_VERSION:-}"
-K3S_SERVER_URL="${K3S_SERVER_URL:-}"
-K3S_TOKEN="${K3S_TOKEN:-}"
-K3S_AGENT_TOKEN="${K3S_AGENT_TOKEN:-}"
-K3S_NODE_NAME="${K3S_NODE_NAME:-}"
-K3S_NODE_IP="${K3S_NODE_IP:-}"
-K3S_FLANNEL_IFACE="${K3S_FLANNEL_IFACE:-}"
-K3S_AGENT_EXTRA_ARGS="${K3S_AGENT_EXTRA_ARGS:-}"
-K3S_SERVER_HOSTNAME="${K3S_SERVER_HOSTNAME:-}"
-K3S_API_PORT="${K3S_API_PORT:-6443}"
-K3S_UFW_ALLOW="${K3S_UFW_ALLOW:-1}"
-K3S_UFW_INTERFACE="${K3S_UFW_INTERFACE:-}"
-HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-}"
-HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
+apply_vps_defaults k3s-agent
 
 usage() {
   cat <<EOF
@@ -75,7 +62,7 @@ apply_tailnet_defaults() {
   local tailnet_ip
 
   tailnet_ip="$(require_tailnet_ready)"
-  [[ -n "$K3S_NODE_NAME" ]] || K3S_NODE_NAME="${HEADSCALE_CLIENT_HOSTNAME:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'k3s-agent')}"
+  [[ -n "$K3S_NODE_NAME" ]] || K3S_NODE_NAME="${HEADSCALE_CLIENT_HOSTNAME:-$(node_identity_name k3s-agent)}"
   [[ -n "$K3S_NODE_IP" ]] || K3S_NODE_IP="$tailnet_ip"
   [[ -n "$K3S_FLANNEL_IFACE" ]] || K3S_FLANNEL_IFACE="$HOLLOW_NET_IFACE"
   [[ -n "$K3S_UFW_INTERFACE" ]] || K3S_UFW_INTERFACE="$HOLLOW_NET_IFACE"
@@ -159,24 +146,8 @@ print_summary() {
 }
 
 main() {
-  case "${1:-}" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    '')
-      ;;
-    *)
-      usage
-      die "未知参数：$1"
-      ;;
-  esac
-
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  parse_noarg_or_help "$@"
+  prepare_vps_run
   validate_input
   apply_tailnet_defaults
   begin_run

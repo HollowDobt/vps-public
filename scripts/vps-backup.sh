@@ -227,11 +227,7 @@ upload_git() {
 
 main() {
   require_profile
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  prepare_vps_run
 
   BACKUP_ENABLE="${BACKUP_ENABLE:-0}"
   BACKUP_LOCAL_DIR="${BACKUP_LOCAL_DIR:-/var/backups/hlwdot}"

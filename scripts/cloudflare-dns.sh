@@ -17,13 +17,7 @@ readonly STATE_DIR="/var/lib/hlwdot/cloudflare-dns"
 # shellcheck source=lib/vps-common.sh
 . "${SCRIPT_DIR}/lib/vps-common.sh"
 
-HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-}"
-CLOUDFLARE_DNS_TARGET_IPV4="${CLOUDFLARE_DNS_TARGET_IPV4:-auto}"
-CLOUDFLARE_DNS_PROXIED="${CLOUDFLARE_DNS_PROXIED:-0}"
-CLOUDFLARE_DNS_TTL="${CLOUDFLARE_DNS_TTL:-120}"
-CLOUDFLARE_HEADSCALE_DNS="${CLOUDFLARE_HEADSCALE_DNS:-1}"
-CLOUDFLARE_K3S_DNS_TARGET="${CLOUDFLARE_K3S_DNS_TARGET:-tailnet}"
-CLOUDFLARE_K3S_DNS_NAMES="${CLOUDFLARE_K3S_DNS_NAMES:-}"
+apply_vps_defaults cloudflare-dns
 
 usage() {
   cat <<EOF
@@ -94,24 +88,8 @@ configure_records() {
 }
 
 main() {
-  case "${1:-}" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    '')
-      ;;
-    *)
-      usage
-      die "未知参数：$1"
-      ;;
-  esac
-
-  require_root
-  setup_state_dir
-  install_traps
-  load_env
-  recover_previous_run
+  parse_noarg_or_help "$@"
+  prepare_vps_run
   validate_input
   begin_run
   apt_install curl jq ca-certificates
