@@ -18,8 +18,8 @@
 #   - BOOTSTRAP_ENABLE_UFW=1 在 Alpine 下启用受管 iptables 防火墙。
 #   - HOLLOW_NET_IFACE 为 hollow-net 网卡名，防火墙默认放行该网卡入站。
 #   - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 写入 daily apk upgrade 并启用 crond。
-#   - BOOTSTRAP_SWAP_SIZE=auto 时，MemTotal 小于或等于 2GB 创建 2GB swapfile；
-#     MemTotal 大于 2GB 创建 4GB swapfile；0 表示不创建。
+#   - BOOTSTRAP_SWAP_SIZE=auto 时，swapfile 所在文件系统可用空间小于或等于 1GB 创建 128MB；
+#     否则 MemTotal 小于或等于 2GB 创建约等于 MemTotal 的 swapfile，MemTotal 大于 2GB 创建 4GB。
 #   - ALPINE_ENABLE_COMMUNITY_REPO=1 时启用 community 仓库；
 #     ALPINE_COMMUNITY_REPO_URL=auto 时按 main 仓库推导，推导失败时使用官方 CDN。
 
@@ -156,14 +156,15 @@ usage() {
   BOOTSTRAP_USER_PASSWORD_HASH='...'
   BOOTSTRAP_ENABLE_SWAP=1
   BOOTSTRAP_SWAPFILE=/swapfile
-  BOOTSTRAP_SWAP_SIZE=auto             # auto、0、1024M、2G；auto 为 <=2GB 内存用 2G，>2GB 内存用 4G
+  BOOTSTRAP_SWAP_SIZE=auto             # auto、0、1024M、2G
 
 说明：
   - 仅支持 Alpine Linux + OpenRC。
   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，只有找到可用登录密钥并写入 root 与 BOOTSTRAP_USER 后才启用仅密钥登录。
   - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 会写入 daily periodic apk upgrade，并启用 crond。
   - BOOTSTRAP_ENABLE_UFW=1 会放行 SSH 端口和 HOLLOW_NET_IFACE 网卡，其余入站默认拒绝。
-  - swapfile 默认开启；auto 按物理内存选择 2G 或 4G，fstab 不设置 pri，使用系统默认 swap 优先级。
+  - swapfile 默认开启；auto 在磁盘可用空间小于或等于 1GB 时使用 128M，否则按 MemTotal 选择自身内存大小或 4G。
+  - fstab 不设置 pri，使用系统默认 swap 优先级。
 EOF
 }
 
@@ -820,11 +821,18 @@ configure_bbr() {
 }
 
 choose_auto_swap_size_mb() {
+  available_mb="${1:-}"
   mem_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+  is_uint "$mem_kb" && [ "$mem_kb" -gt 0 ] || die "无法读取 /proc/meminfo 中的 MemTotal。"
   mem_mb=$(((mem_kb + 1023) / 1024))
 
+  if is_uint "$available_mb" && [ "$available_mb" -le 1024 ]; then
+    printf '128\n'
+    return
+  fi
+
   if [ "$mem_mb" -le 2048 ]; then
-    printf '2048\n'
+    printf '%s\n' "$mem_mb"
   else
     printf '4096\n'
   fi
@@ -832,9 +840,10 @@ choose_auto_swap_size_mb() {
 
 parse_swap_size_mb() {
   raw="$1"
+  available_mb="${2:-}"
   case "$raw" in
     auto)
-      choose_auto_swap_size_mb
+      choose_auto_swap_size_mb "$available_mb"
       ;;
     0)
       printf '0\n'
@@ -882,9 +891,17 @@ ensure_fstab_swap_entry() {
 }
 
 configure_swapfile() {
+  reserve_mb=256
+
   [ "$BOOTSTRAP_ENABLE_SWAP" = 1 ] || return 0
 
-  size_mb=$(parse_swap_size_mb "$BOOTSTRAP_SWAP_SIZE")
+  swap_dir=$(dirname "$BOOTSTRAP_SWAPFILE")
+  mkdir -p "$swap_dir"
+  available_kb=$(df -kP "$swap_dir" | awk 'NR == 2 { print $4 }')
+  is_uint "$available_kb" || die "无法读取 ${swap_dir} 的可用磁盘空间。"
+  available_mb=$((available_kb / 1024))
+
+  size_mb=$(parse_swap_size_mb "$BOOTSTRAP_SWAP_SIZE" "$available_mb")
   SWAP_SIZE_MB="$size_mb"
   if [ "$size_mb" -eq 0 ]; then
     log "BOOTSTRAP_SWAP_SIZE=0，跳过 swapfile。"
@@ -912,11 +929,10 @@ configure_swapfile() {
     die "swapfile 目标已存在但不是 swap 文件，拒绝覆盖：$BOOTSTRAP_SWAPFILE"
   fi
 
-  swap_dir=$(dirname "$BOOTSTRAP_SWAPFILE")
-  mkdir -p "$swap_dir"
-  available_kb=$(df -kP "$swap_dir" | awk 'NR == 2 { print $4 }')
-  available_mb=$((available_kb / 1024))
-  [ "$available_mb" -gt $((size_mb + 256)) ] || die "磁盘空间不足，无法在 ${swap_dir} 创建 ${size_mb}M swapfile。"
+  if [ "$BOOTSTRAP_SWAP_SIZE" = auto ] && [ "$size_mb" -eq 128 ] && [ "$available_mb" -le 1024 ]; then
+    reserve_mb=0
+  fi
+  [ "$available_mb" -gt $((size_mb + reserve_mb)) ] || die "磁盘空间不足，无法在 ${swap_dir} 创建 ${size_mb}M swapfile。"
 
   printf 'swapfile=%s\nsize_mb=%s\n' "$BOOTSTRAP_SWAPFILE" "$size_mb" >"$SWAP_IN_PROGRESS"
   log "创建 swapfile：${BOOTSTRAP_SWAPFILE}，大小 ${size_mb}M。"

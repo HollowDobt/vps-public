@@ -15,8 +15,8 @@
 #   - 需要修改 SSH 端口时填写 BOOTSTRAP_SSH_PORT。
 #   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，有可用公钥才禁用密码登录；1 强制禁用，0 保留。
 #   - BOOTSTRAP_SUDO_NOPASSWD=auto 时，有可用公钥才启用免密 sudo；1/0 为强制开关。
-#   - BOOTSTRAP_SWAP_SIZE=auto 时，MemTotal 小于或等于 2GB 创建 2GB swapfile；
-#     MemTotal 大于 2GB 创建 4GB swapfile；0 表示不创建。
+#   - BOOTSTRAP_SWAP_SIZE=auto 时，swapfile 所在文件系统可用空间小于或等于 1GB 创建 128MB；
+#     否则 MemTotal 小于或等于 2GB 创建约等于 MemTotal 的 swapfile，MemTotal 大于 2GB 创建 4GB。
 #
 # 中断后再次运行时，脚本会清理受管临时文件、恢复 dpkg/apt 半配置状态，
 # 然后继续完成剩余配置。
@@ -68,8 +68,9 @@ BOOTSTRAP_AUTHORIZED_KEYS="${BOOTSTRAP_AUTHORIZED_KEYS:-}"
 BOOTSTRAP_USER_PASSWORD_HASH="${BOOTSTRAP_USER_PASSWORD_HASH:-}"
 BOOTSTRAP_USER_PASSWORD="${BOOTSTRAP_USER_PASSWORD:-}"
 
-# swapfile 默认开启。BOOTSTRAP_SWAP_SIZE=auto 时按物理内存选择：
-# MemTotal 小于或等于 2GB 创建 2GB swapfile；MemTotal 大于 2GB 创建 4GB swapfile。
+# swapfile 默认开启。BOOTSTRAP_SWAP_SIZE=auto 时先看 swapfile 所在文件系统可用空间：
+# 可用空间小于或等于 1GB 创建 128MB；否则 MemTotal 小于或等于 2GB 创建约等于
+# MemTotal 的 swapfile，MemTotal 大于 2GB 创建 4GB。
 # fstab 中不设置 pri，让内核使用默认 swap 优先级。
 BOOTSTRAP_ENABLE_SWAP="${BOOTSTRAP_ENABLE_SWAP:-1}"
 BOOTSTRAP_SWAPFILE="${BOOTSTRAP_SWAPFILE:-/swapfile}"
@@ -207,12 +208,13 @@ usage() {
   BOOTSTRAP_USER_PASSWORD_HASH='\$y\$...'
   BOOTSTRAP_ENABLE_SWAP=1
   BOOTSTRAP_SWAPFILE=/swapfile
-  BOOTSTRAP_SWAP_SIZE=auto             # auto、0、1024M、2G；auto 为 <=2GB 内存用 2G，>2GB 内存用 4G
+  BOOTSTRAP_SWAP_SIZE=auto             # auto、0、1024M、2G
 
 说明：
   - 仅支持 Debian 13。
   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，只有找到可用登录密钥并写入 root 与 hollow 后才启用仅密钥登录。
-  - swapfile 默认开启；auto 按物理内存选择 2G 或 4G，fstab 不设置 pri，使用系统默认 swap 优先级。
+  - swapfile 默认开启；auto 在磁盘可用空间小于或等于 1GB 时使用 128M，否则按 MemTotal 选择自身内存大小或 4G。
+  - fstab 不设置 pri，使用系统默认 swap 优先级。
   - 中断后可重新执行；脚本会先检查上次未完成的受管配置。
 EOF
 }
@@ -849,14 +851,21 @@ configure_bbr() {
 }
 
 choose_auto_swap_size_mb() {
+  local available_mb="$1"
   local mem_kb
   local mem_mb
 
   mem_kb="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+  [[ "$mem_kb" =~ ^[0-9]+$ && "$mem_kb" -gt 0 ]] || die "无法读取 /proc/meminfo 中的 MemTotal。"
   mem_mb=$(((mem_kb + 1023) / 1024))
 
+  if [[ "$available_mb" =~ ^[0-9]+$ ]] && ((available_mb <= 1024)); then
+    printf '128\n'
+    return
+  fi
+
   if ((mem_mb <= 2048)); then
-    printf '2048\n'
+    printf '%s\n' "$mem_mb"
   else
     printf '4096\n'
   fi
@@ -864,12 +873,13 @@ choose_auto_swap_size_mb() {
 
 parse_swap_size_mb() {
   local raw="$1"
+  local available_mb="${2:-}"
   local number
   local unit
 
   case "$raw" in
     auto)
-      choose_auto_swap_size_mb
+      choose_auto_swap_size_mb "$available_mb"
       return
       ;;
     0)
@@ -928,10 +938,16 @@ configure_swapfile() {
   local size_mb
   local swap_dir
   local available_mb
+  local reserve_mb=256
 
   [[ "$BOOTSTRAP_ENABLE_SWAP" == "1" ]] || return 0
 
-  size_mb="$(parse_swap_size_mb "$BOOTSTRAP_SWAP_SIZE")"
+  swap_dir="$(dirname "$BOOTSTRAP_SWAPFILE")"
+  install -d -o root -g root -m 0755 "$swap_dir"
+  available_mb="$(df -Pm "$swap_dir" | awk 'NR == 2 { print $4 }')"
+  [[ "$available_mb" =~ ^[0-9]+$ ]] || die "无法读取 ${swap_dir} 的可用磁盘空间。"
+
+  size_mb="$(parse_swap_size_mb "$BOOTSTRAP_SWAP_SIZE" "$available_mb")"
   SWAP_SIZE_MB="$size_mb"
   if ((size_mb == 0)); then
     log "BOOTSTRAP_SWAP_SIZE=0，跳过 swapfile。"
@@ -960,10 +976,10 @@ configure_swapfile() {
     die "swapfile 目标已存在但不是 swap 文件，拒绝覆盖：$BOOTSTRAP_SWAPFILE"
   fi
 
-  swap_dir="$(dirname "$BOOTSTRAP_SWAPFILE")"
-  install -d -o root -g root -m 0755 "$swap_dir"
-  available_mb="$(df -Pm "$swap_dir" | awk 'NR == 2 { print $4 }')"
-  ((available_mb > size_mb + 256)) || die "磁盘空间不足，无法在 ${swap_dir} 创建 ${size_mb}M swapfile；请运行 df -h ${swap_dir} 检查可用空间。"
+  if [[ "$BOOTSTRAP_SWAP_SIZE" == "auto" && "$size_mb" -eq 128 && "$available_mb" -le 1024 ]]; then
+    reserve_mb=0
+  fi
+  ((available_mb > size_mb + reserve_mb)) || die "磁盘空间不足，无法在 ${swap_dir} 创建 ${size_mb}M swapfile；请运行 df -h ${swap_dir} 检查可用空间。"
 
   # 从这里开始写入 in-progress 标记。若 fallocate/dd/mkswap/swapon 期间中断，
   # 下次运行会根据这个标记清理未完成的受管 swapfile，然后重新创建。
