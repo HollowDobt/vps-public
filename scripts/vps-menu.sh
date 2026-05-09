@@ -19,13 +19,13 @@ MENU_LABELS=(
   "接入 Headscale 网络"
   "Alpine 节点接入 Headscale 网络"
   "部署 k3s 主节点"
-  "全流程：作为子节点并入网络"
   "部署 k3s 子节点"
   "部署 Flux GitOps"
   "查看 k3s 节点 token"
   "Headscale 主节点备份"
   "k3s 主节点备份"
   "部署 NodeGet hollow-net 探针页"
+  "Alpine 基础初始化"
   "退出"
 )
 # 面板按操作系统 -> 功能子类 分段。
@@ -43,7 +43,7 @@ MENU_OS_GROUPS=(
   "Debian 系统"
   "Debian 系统"
   "Debian 系统"
-  "Debian 系统"
+  "Alpine 系统"
   "Alpine 系统"
   ""
 )
@@ -59,13 +59,13 @@ MENU_SUBGROUPS=(
   "k3s"
   "k3s"
   "k3s"
-  "k3s"
   "Headscale"
   "k3s"
   "NodeGet"
+  "系统准备"
   ""
 )
-MENU_DISPLAY_ORDER=(0 1 2 3 4 5 12 7 8 9 10 11 13 6 14 15)
+MENU_DISPLAY_ORDER=(0 1 2 3 4 5 11 7 8 9 10 12 14 6 13 15)
 MENU_HINTS=(
   "启动 Debian 13 重装"
   "首次配置并立即校验"
@@ -75,17 +75,17 @@ MENU_HINTS=(
   "当前节点加入 Headscale 网络"
   "接入 Headscale 网络，可上报分流路由"
   "检查 Headscale 网络，部署 server、记录 token、部署 GitOps"
-  "新 VPS 子节点流程：重装、初始化、Headscale 接入、k3s agent"
   "检查 Headscale 网络，部署 agent"
   "安装 Flux 控制面"
   "输出 worker 接入 token"
   "加密并上传 Headscale 状态"
   "加密并上传 k3s/Flux 状态"
   "Alpine NAT LXC：NodeGet Server、StatusShow、Cloudflare Tunnel"
+  "Alpine/OpenRC 基础初始化：用户、SSH、安全防护、BBR、swapfile"
   "返回 shell"
 )
-MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "f" "0")
-MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-authkey" "headscale-client" "alpine-hollow-client" "k3s-main-node" "k3s-worker-full-node" "k3s-worker-node" "flux-gitops" "k3s-token" "backup-headscale" "backup-k3s" "nodeget-statusshow" "exit")
+MENU_KEYS=("1" "2" "3" "4" "5" "6" "7" "8" "a" "b" "c" "d" "e" "f" "g" "0")
+MENU_ACTIONS=("reinstall" "bootstrap" "check" "headscale-main-node" "headscale-authkey" "headscale-client" "alpine-hollow-client" "k3s-main-node" "k3s-worker-node" "flux-gitops" "k3s-token" "backup-headscale" "backup-k3s" "nodeget-statusshow" "alpine-bootstrap" "exit")
 
 ITEM_LINES=()
 MENU_END_LINE=1
@@ -506,6 +506,15 @@ run_selected_action() {
       run_sh_script "$(script_path alpine-hollow-client.sh)" || true
       pause_return
       ;;
+    alpine-bootstrap)
+      confirm_action "$label" || {
+        printf '\n已取消。\n'
+        pause_return
+        return 0
+      }
+      run_sh_script "$(script_path alpine-bootstrap.sh)" || true
+      pause_return
+      ;;
     k3s-server)
       confirm_action "$label" || {
         printf '\n已取消。\n'
@@ -531,15 +540,6 @@ run_selected_action() {
         return 0
       }
       run_script "$(script_path k3s-worker-node.sh)" || true
-      pause_return
-      ;;
-    k3s-worker-full-node)
-      confirm_action "$label" || {
-        printf '\n已取消。\n'
-        pause_return
-        return 0
-      }
-      run_script "$(script_path k3s-worker-full-node.sh)" || true
       pause_return
       ;;
     flux-gitops)

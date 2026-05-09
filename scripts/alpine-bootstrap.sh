@@ -1,0 +1,1015 @@
+#!/bin/sh
+# Alpine VPS 初装后的首次基础配置脚本。
+#
+# Alpine/OpenRC 环境的基础初始化：hollow 登录、SSH 公钥、安全防护、
+# 自动 apk 更新、BBR、swapfile，以及中断后的可重复执行恢复。
+#
+# 运行方式：
+#   sudo sh scripts/alpine-bootstrap.sh
+#
+# 运行前配置：
+#   - SSH 登录必须有其一：
+#       BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...'
+#       BOOTSTRAP_AUTHORIZED_KEYS_SOURCE 指向的文件中已有公钥，默认 /root/.ssh/authorized_keys
+#   - 需要固定系统 hostname 时填写 BOOTSTRAP_HOSTNAME；留空时不改 hostname。
+#   - 需要修改 SSH 端口时填写 BOOTSTRAP_SSH_PORT。
+#   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，有可用公钥才禁用密码登录；1 强制禁用，0 保留。
+#   - BOOTSTRAP_SUDO_NOPASSWD=auto 时，有可用公钥才启用免密 sudo；1/0 为强制开关。
+#   - BOOTSTRAP_ENABLE_UFW=1 在 Alpine 下启用受管 iptables 防火墙。
+#   - HOLLOW_NET_IFACE 为 hollow-net 网卡名，防火墙默认放行该网卡入站。
+#   - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 写入 daily apk upgrade 并启用 crond。
+#   - BOOTSTRAP_SWAP_SIZE=auto 时，MemTotal 小于或等于 2GB 创建 2GB swapfile；
+#     MemTotal 大于 2GB 创建 4GB swapfile；0 表示不创建。
+#   - ALPINE_ENABLE_COMMUNITY_REPO=1 时启用 community 仓库；
+#     ALPINE_COMMUNITY_REPO_URL=auto 时按 main 仓库推导，推导失败时使用官方 CDN。
+
+set -eu
+umask 027
+
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+
+SCRIPT_NAME=$(basename "$0")
+STATE_DIR="/var/lib/hlwdot/alpine-bootstrap"
+TMP_DIR="${STATE_DIR}/tmp"
+DONE_MARKER="${STATE_DIR}/done.env"
+INTERRUPT_MARKER="${STATE_DIR}/interrupted"
+SWAP_IN_PROGRESS="${STATE_DIR}/swap-create.in-progress"
+SSHD_CHANGE_IN_PROGRESS="${STATE_DIR}/sshd-change.in-progress"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/10-hlwdot-bootstrap.conf"
+SSHD_DROPIN_BACKUP="${STATE_DIR}/sshd-dropin.previous"
+SSHD_DROPIN_HAD_BACKUP="${STATE_DIR}/sshd-dropin.had-backup"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+SSHD_CONFIG_BACKUP="${STATE_DIR}/sshd-config.previous"
+SSHD_CONFIG_HAD_BACKUP="${STATE_DIR}/sshd-config.had-backup"
+FAIL2BAN_JAIL="/etc/fail2ban/jail.d/10-hlwdot-sshd.conf"
+APK_AUTO_UPGRADE="/etc/periodic/daily/90-hlwdot-apk-upgrade"
+LOCALE_PROFILE="/etc/profile.d/90-hlwdot-locale.sh"
+FIREWALL_SCRIPT="/etc/local.d/hlwdot-firewall.start"
+MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
+SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
+
+BOOTSTRAP_USER="${BOOTSTRAP_USER:-hollow}"
+BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-${VPS_NODE_NAME:-}}"
+BOOTSTRAP_TIMEZONE="${BOOTSTRAP_TIMEZONE:-Asia/Shanghai}"
+BOOTSTRAP_LOCALE="${BOOTSTRAP_LOCALE:-en_US.UTF-8}"
+BOOTSTRAP_EXTRA_LOCALES="${BOOTSTRAP_EXTRA_LOCALES:-zh_CN.UTF-8}"
+BOOTSTRAP_SSH_PORT="${BOOTSTRAP_SSH_PORT:-22}"
+BOOTSTRAP_SSH_LOCKDOWN="${BOOTSTRAP_SSH_LOCKDOWN:-auto}"
+BOOTSTRAP_SUDO_NOPASSWD="${BOOTSTRAP_SUDO_NOPASSWD:-auto}"
+BOOTSTRAP_ENABLE_UFW="${BOOTSTRAP_ENABLE_UFW:-1}"
+BOOTSTRAP_ENABLE_FAIL2BAN="${BOOTSTRAP_ENABLE_FAIL2BAN:-1}"
+BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES="${BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES:-1}"
+BOOTSTRAP_FULL_UPGRADE="${BOOTSTRAP_FULL_UPGRADE:-1}"
+BOOTSTRAP_ENABLE_BBR="${BOOTSTRAP_ENABLE_BBR:-1}"
+BOOTSTRAP_AUTHORIZED_KEYS_SOURCE="${BOOTSTRAP_AUTHORIZED_KEYS_SOURCE:-/root/.ssh/authorized_keys}"
+BOOTSTRAP_AUTHORIZED_KEYS="${BOOTSTRAP_AUTHORIZED_KEYS:-}"
+BOOTSTRAP_USER_PASSWORD_HASH="${BOOTSTRAP_USER_PASSWORD_HASH:-}"
+BOOTSTRAP_USER_PASSWORD="${BOOTSTRAP_USER_PASSWORD:-}"
+HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
+BOOTSTRAP_ENABLE_SWAP="${BOOTSTRAP_ENABLE_SWAP:-1}"
+BOOTSTRAP_SWAPFILE="${BOOTSTRAP_SWAPFILE:-/swapfile}"
+BOOTSTRAP_SWAP_SIZE="${BOOTSTRAP_SWAP_SIZE:-auto}"
+ALPINE_ENABLE_COMMUNITY_REPO="${ALPINE_ENABLE_COMMUNITY_REPO:-1}"
+ALPINE_COMMUNITY_REPO_URL="${ALPINE_COMMUNITY_REPO_URL:-auto}"
+
+AUTHORIZED_KEYS_INSTALLED=0
+SSH_LOCKDOWN_ACTIVE=0
+BBR_CONFIGURED=0
+SWAP_SIZE_MB=0
+TEMP_FILES=''
+
+log_location() {
+  hostname 2>/dev/null || printf 'unknown'
+}
+
+log() {
+  printf '[%s] INFO：%s 在 %s 执行：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*"
+}
+
+warn() {
+  printf '[%s] WARN：%s 在 %s 执行时提示：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
+}
+
+die() {
+  printf '[%s] ERROR：%s 在 %s 执行脚本时发生错误：%s\n' "$SCRIPT_NAME" "$SCRIPT_NAME" "$(log_location)" "$*" >&2
+  exit 1
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+enabled_label() {
+  if [ "$1" = 1 ]; then
+    printf '启用'
+  else
+    printf '停用'
+  fi
+}
+
+configured_label() {
+  if [ "$1" = 1 ]; then
+    printf '已配置'
+  else
+    printf '未配置'
+  fi
+}
+
+ssh_password_login_label() {
+  if [ "$SSH_LOCKDOWN_ACTIVE" = 1 ]; then
+    printf '禁用'
+  else
+    printf '保留'
+  fi
+}
+
+usage() {
+  cat <<EOF
+用法：
+  sh $SCRIPT_NAME
+
+可配置环境变量：
+  BOOTSTRAP_USER=hollow
+  BOOTSTRAP_HOSTNAME=server-new
+  BOOTSTRAP_TIMEZONE=Asia/Shanghai
+  BOOTSTRAP_LOCALE=en_US.UTF-8
+  BOOTSTRAP_EXTRA_LOCALES=zh_CN.UTF-8
+  BOOTSTRAP_SSH_PORT=22
+  BOOTSTRAP_SSH_LOCKDOWN=auto          # auto、1、0
+  BOOTSTRAP_SUDO_NOPASSWD=auto         # auto、1、0
+  BOOTSTRAP_ENABLE_UFW=1               # Alpine 下对应受管 iptables 防火墙
+  BOOTSTRAP_ENABLE_FAIL2BAN=1
+  BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1
+  BOOTSTRAP_FULL_UPGRADE=1
+  BOOTSTRAP_ENABLE_BBR=1
+  HOLLOW_NET_IFACE=hollow-net
+  BOOTSTRAP_AUTHORIZED_KEYS_SOURCE=/root/.ssh/authorized_keys
+  BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...'
+  BOOTSTRAP_USER_PASSWORD_HASH='...'
+  BOOTSTRAP_ENABLE_SWAP=1
+  BOOTSTRAP_SWAPFILE=/swapfile
+  BOOTSTRAP_SWAP_SIZE=auto             # auto、0、1024M、2G；auto 为 <=2GB 内存用 2G，>2GB 内存用 4G
+
+说明：
+  - 仅支持 Alpine Linux + OpenRC。
+  - BOOTSTRAP_SSH_LOCKDOWN=auto 时，只有找到可用登录密钥并写入 root 与 BOOTSTRAP_USER 后才启用仅密钥登录。
+  - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 会写入 daily periodic apk upgrade，并启用 crond。
+  - BOOTSTRAP_ENABLE_UFW=1 会放行 SSH 端口和 HOLLOW_NET_IFACE 网卡，其余入站默认拒绝。
+  - swapfile 默认开启；auto 按物理内存选择 2G 或 4G，fstab 不设置 pri，使用系统默认 swap 优先级。
+EOF
+}
+
+require_root() {
+  [ "$(id -u)" = 0 ] || die "请使用 root 运行。"
+}
+
+validate_bool() {
+  name="$1"
+  value="$2"
+  case "$value" in
+    0|1) ;;
+    *) die "$name 只能是 0 或 1。" ;;
+  esac
+}
+
+validate_auto_bool() {
+  name="$1"
+  value="$2"
+  case "$value" in
+    auto|0|1) ;;
+    *) die "$name 只能是 auto、0 或 1。" ;;
+  esac
+}
+
+validate_input() {
+  case "$BOOTSTRAP_USER" in
+    ''|*[!a-z_0-9-]*|-*) die "BOOTSTRAP_USER 必须是简单的小写 Linux 用户名。" ;;
+  esac
+
+  is_uint "$BOOTSTRAP_SSH_PORT" || die "BOOTSTRAP_SSH_PORT 必须是数字。"
+  [ "$BOOTSTRAP_SSH_PORT" -ge 1 ] && [ "$BOOTSTRAP_SSH_PORT" -le 65535 ] || die "BOOTSTRAP_SSH_PORT 必须在 1 到 65535 之间。"
+
+  if [ -n "$BOOTSTRAP_HOSTNAME" ]; then
+    printf '%s\n' "$BOOTSTRAP_HOSTNAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$' || die "BOOTSTRAP_HOSTNAME 格式不合法。"
+    case "$BOOTSTRAP_HOSTNAME" in
+      *..*) die "BOOTSTRAP_HOSTNAME 不能包含连续的点。" ;;
+    esac
+  fi
+
+  case "$BOOTSTRAP_TIMEZONE" in
+    /*|*..*) die "BOOTSTRAP_TIMEZONE 不能是绝对路径或包含 ..。" ;;
+  esac
+  printf '%s\n' "$BOOTSTRAP_TIMEZONE" | grep -Eq '^[A-Za-z0-9_+./-]+$' || die "BOOTSTRAP_TIMEZONE 包含非法字符。"
+
+  case "$BOOTSTRAP_SWAPFILE" in
+    /*) ;;
+    *) die "BOOTSTRAP_SWAPFILE 必须是绝对路径。" ;;
+  esac
+  [ "$BOOTSTRAP_SWAPFILE" != / ] || die "BOOTSTRAP_SWAPFILE 不能是根目录。"
+  if printf '%s' "$BOOTSTRAP_SWAPFILE" | grep -q '[[:space:]]'; then
+    die "BOOTSTRAP_SWAPFILE 不能包含空白字符。"
+  fi
+
+  validate_auto_bool BOOTSTRAP_SSH_LOCKDOWN "$BOOTSTRAP_SSH_LOCKDOWN"
+  validate_auto_bool BOOTSTRAP_SUDO_NOPASSWD "$BOOTSTRAP_SUDO_NOPASSWD"
+  validate_bool BOOTSTRAP_ENABLE_UFW "$BOOTSTRAP_ENABLE_UFW"
+  validate_bool BOOTSTRAP_ENABLE_FAIL2BAN "$BOOTSTRAP_ENABLE_FAIL2BAN"
+  validate_bool BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES "$BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES"
+  validate_bool BOOTSTRAP_FULL_UPGRADE "$BOOTSTRAP_FULL_UPGRADE"
+  validate_bool BOOTSTRAP_ENABLE_BBR "$BOOTSTRAP_ENABLE_BBR"
+  validate_bool BOOTSTRAP_ENABLE_SWAP "$BOOTSTRAP_ENABLE_SWAP"
+  validate_bool ALPINE_ENABLE_COMMUNITY_REPO "$ALPINE_ENABLE_COMMUNITY_REPO"
+
+  case "$HOLLOW_NET_IFACE" in
+    ''|*[!A-Za-z0-9_.:-]*) die "HOLLOW_NET_IFACE 只能包含字母、数字、下划线、点、冒号和连字符。" ;;
+  esac
+  [ "${#HOLLOW_NET_IFACE}" -le 15 ] || die "HOLLOW_NET_IFACE 长度不能超过 15 个字符。"
+}
+
+require_alpine_openrc() {
+  [ -r /etc/alpine-release ] || die "当前系统不是 Alpine Linux。"
+  command_exists apk || die "缺少 apk。"
+  command_exists rc-service || die "缺少 OpenRC rc-service。"
+  command_exists rc-update || die "缺少 OpenRC rc-update。"
+}
+
+setup_state_dir() {
+  mkdir -p "$TMP_DIR"
+  chmod 0755 "$STATE_DIR"
+  chmod 0700 "$TMP_DIR"
+}
+
+track_tempfile() {
+  TEMP_FILES="${TEMP_FILES}
+$1"
+}
+
+mktemp_managed() {
+  temp_file=$(mktemp "${TMP_DIR}/${SCRIPT_NAME}.XXXXXX")
+  track_tempfile "$temp_file"
+  printf '%s\n' "$temp_file"
+}
+
+cleanup_tempfiles() {
+  old_ifs=$IFS
+  IFS='
+'
+  for temp_file in $TEMP_FILES; do
+    [ -n "$temp_file" ] && [ -e "$temp_file" ] && rm -f -- "$temp_file"
+  done
+  IFS=$old_ifs
+}
+
+on_interrupt() {
+  warn "收到中断信号，已停止。再次运行脚本会先做恢复检查。"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$INTERRUPT_MARKER" 2>/dev/null || true
+  exit 130
+}
+
+on_error() {
+  warn "脚本收到 HUP 信号或命令执行失败；请查看上方命令输出。"
+  exit 1
+}
+
+trap cleanup_tempfiles EXIT
+trap on_interrupt INT TERM
+trap on_error HUP
+
+atomic_install_file() {
+  source_file="$1"
+  target_file="$2"
+  mode="$3"
+  owner="$4"
+  group="$5"
+  target_dir=$(dirname "$target_file")
+
+  mkdir -p "$target_dir"
+  temp_target=$(mktemp "${target_dir}/.${SCRIPT_NAME}.XXXXXX")
+  track_tempfile "$temp_target"
+  cp "$source_file" "$temp_target"
+  chown "$owner:$group" "$temp_target"
+  chmod "$mode" "$temp_target"
+  mv -f -- "$temp_target" "$target_file"
+}
+
+is_swap_active() {
+  swap_path="$1"
+  [ -r /proc/swaps ] || return 1
+  awk -v path="$swap_path" 'NR > 1 && $1 == path { found = 1 } END { exit found ? 0 : 1 }' /proc/swaps
+}
+
+safe_remove_managed_swapfile() {
+  swap_path="$1"
+  [ -n "$swap_path" ] || return 1
+  case "$swap_path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ "$swap_path" != / ] || return 1
+  if [ -e "$swap_path" ] && ! is_swap_active "$swap_path"; then
+    rm -f -- "$swap_path"
+    log "删除未完成的 swapfile：$swap_path"
+  fi
+}
+
+recover_swap_if_needed() {
+  [ -f "$SWAP_IN_PROGRESS" ] || return 0
+  swap_path=$(sed -n 's/^swapfile=//p' "$SWAP_IN_PROGRESS" | head -n 1)
+
+  if [ -n "$swap_path" ] && is_swap_active "$swap_path"; then
+    log "swapfile 已处于启用状态，移除未完成标记。"
+  else
+    safe_remove_managed_swapfile "$swap_path" || warn "未能清理上次未完成的 swapfile：${swap_path:-未知路径}"
+  fi
+
+  rm -f -- "$SWAP_IN_PROGRESS"
+}
+
+sshd_binary() {
+  if command_exists sshd; then
+    command -v sshd
+  elif [ -x /usr/sbin/sshd ]; then
+    printf '/usr/sbin/sshd\n'
+  else
+    return 1
+  fi
+}
+
+test_sshd_config() {
+  sshd=$(sshd_binary)
+  mkdir -p /run/sshd
+  ssh-keygen -A >/dev/null 2>&1 || true
+  "$sshd" -t
+}
+
+rollback_sshd_config() {
+  if [ -f "$SSHD_DROPIN_HAD_BACKUP" ] && [ -f "$SSHD_DROPIN_BACKUP" ]; then
+    cp "$SSHD_DROPIN_BACKUP" "$SSHD_DROPIN"
+    chmod 0644 "$SSHD_DROPIN"
+    log "恢复 SSH drop-in 备份。"
+  else
+    rm -f -- "$SSHD_DROPIN"
+    log "移除未完成写入的 SSH drop-in。"
+  fi
+
+  if [ -f "$SSHD_CONFIG_HAD_BACKUP" ] && [ -f "$SSHD_CONFIG_BACKUP" ]; then
+    cp "$SSHD_CONFIG_BACKUP" "$SSHD_CONFIG"
+    chmod 0644 "$SSHD_CONFIG"
+    log "恢复 sshd_config 备份。"
+  fi
+}
+
+recover_sshd_if_needed() {
+  [ -f "$SSHD_CHANGE_IN_PROGRESS" ] || return 0
+
+  if test_sshd_config; then
+    log "SSH 配置校验通过，移除未完成标记。"
+  else
+    warn "检测到上次 SSH 配置未完成且当前 sshd 配置无效，开始回滚受管配置。"
+    rollback_sshd_config
+    test_sshd_config || die "回滚受管 SSH 配置后，sshd 配置仍然无效。"
+  fi
+
+  rm -f -- "$SSHD_CHANGE_IN_PROGRESS" "$SSHD_DROPIN_BACKUP" "$SSHD_DROPIN_HAD_BACKUP" "$SSHD_CONFIG_BACKUP" "$SSHD_CONFIG_HAD_BACKUP"
+}
+
+recover_previous_run() {
+  if [ -d "$TMP_DIR" ]; then
+    find "$TMP_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+  fi
+  if [ -f "$INTERRUPT_MARKER" ]; then
+    log "检测到上次运行曾被中断，开始恢复检查。"
+    rm -f -- "$INTERRUPT_MARKER"
+  fi
+
+  recover_swap_if_needed
+  recover_sshd_if_needed
+}
+
+ensure_community_repo() {
+  [ "$ALPINE_ENABLE_COMMUNITY_REPO" = 1 ] || return 0
+  [ -r /etc/apk/repositories ] || return 0
+  grep -Eq '^[^#].*/community([[:space:]]*)?$' /etc/apk/repositories && return 0
+
+  if [ "$ALPINE_COMMUNITY_REPO_URL" != auto ]; then
+    repo="$ALPINE_COMMUNITY_REPO_URL"
+  else
+    repo=$(awk '
+      /^[[:space:]]*#/ { next }
+      /\/main([[:space:]]*)?$/ {
+        sub(/\/main([[:space:]]*)?$/, "/community")
+        print
+        exit
+      }
+    ' /etc/apk/repositories)
+    if [ -z "$repo" ]; then
+      version=$(cut -d. -f1,2 /etc/alpine-release)
+      repo="https://dl-cdn.alpinelinux.org/alpine/v${version}/community"
+    fi
+  fi
+
+  log "启用 Alpine community 仓库：$repo"
+  printf '\n%s\n' "$repo" >>/etc/apk/repositories
+}
+
+install_packages() {
+  packages='bash bash-completion ca-certificates chrony curl fail2ban file git gnupg htop iproute2 iptables jq kmod logrotate openssh openrc rsync shadow sudo tar tmux tzdata unzip vim wget zip'
+
+  ensure_community_repo
+  log "更新 apk 软件源索引。"
+  apk update
+
+  if [ "$BOOTSTRAP_FULL_UPGRADE" = 1 ]; then
+    log "升级系统已有软件包。"
+    apk upgrade
+  fi
+
+  log "安装基础工具和安全组件。"
+  apk add $packages
+  command_exists update-ca-certificates && update-ca-certificates >/dev/null 2>&1 || true
+}
+
+configure_hostname() {
+  [ -n "$BOOTSTRAP_HOSTNAME" ] || return 0
+
+  log "设置主机名：$BOOTSTRAP_HOSTNAME"
+  printf '%s\n' "$BOOTSTRAP_HOSTNAME" >/etc/hostname
+  hostname "$BOOTSTRAP_HOSTNAME" || true
+
+  temp_hosts=$(mktemp_managed)
+  if [ -f /etc/hosts ]; then
+    awk -v host="$BOOTSTRAP_HOSTNAME" '
+      BEGIN { updated = 0 }
+      /^[[:space:]]*#/ { print; next }
+      /^127\.0\.1\.1[[:space:]]+/ {
+        print "127.0.1.1\t" host
+        updated = 1
+        next
+      }
+      { print }
+      END {
+        if (!updated) print "127.0.1.1\t" host
+      }
+    ' /etc/hosts >"$temp_hosts"
+  else
+    printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n' "$BOOTSTRAP_HOSTNAME" >"$temp_hosts"
+  fi
+  atomic_install_file "$temp_hosts" /etc/hosts 0644 root root
+}
+
+configure_timezone() {
+  [ -e "/usr/share/zoneinfo/$BOOTSTRAP_TIMEZONE" ] || die "时区不存在：$BOOTSTRAP_TIMEZONE"
+
+  log "设置时区：$BOOTSTRAP_TIMEZONE"
+  ln -sfn "/usr/share/zoneinfo/$BOOTSTRAP_TIMEZONE" /etc/localtime
+  printf '%s\n' "$BOOTSTRAP_TIMEZONE" >/etc/timezone
+}
+
+configure_locale() {
+  temp_locale=$(mktemp_managed)
+  temp_env=$(mktemp_managed)
+
+  log "配置默认 locale 环境变量：$BOOTSTRAP_LOCALE"
+  {
+    printf '# 由 Alpine 基础配置脚本管理。\n'
+    printf 'export LANG=%s\n' "$BOOTSTRAP_LOCALE"
+  } >"$temp_locale"
+  atomic_install_file "$temp_locale" "$LOCALE_PROFILE" 0644 root root
+
+  if [ -f /etc/environment ]; then
+    awk '$0 !~ /^LANG=/' /etc/environment >"$temp_env"
+  else
+    : >"$temp_env"
+  fi
+  printf 'LANG=%s\n' "$BOOTSTRAP_LOCALE" >>"$temp_env"
+  atomic_install_file "$temp_env" /etc/environment 0644 root root
+}
+
+home_for_user() {
+  user_name="$1"
+  awk -F: -v user="$user_name" '$1 == user { print $6; exit }' /etc/passwd
+}
+
+ensure_user() {
+  log "确保用户 $BOOTSTRAP_USER 存在并加入 wheel 组。"
+
+  if id "$BOOTSTRAP_USER" >/dev/null 2>&1; then
+    usermod -s /bin/bash "$BOOTSTRAP_USER" 2>/dev/null || true
+  else
+    adduser -D -s /bin/bash "$BOOTSTRAP_USER"
+  fi
+  addgroup "$BOOTSTRAP_USER" wheel >/dev/null 2>&1 || true
+
+  if [ -n "$BOOTSTRAP_USER_PASSWORD_HASH" ]; then
+    log "为 $BOOTSTRAP_USER 设置密码 hash。"
+    usermod -p "$BOOTSTRAP_USER_PASSWORD_HASH" "$BOOTSTRAP_USER"
+  elif [ -n "$BOOTSTRAP_USER_PASSWORD" ]; then
+    log "为 $BOOTSTRAP_USER 设置临时密码。"
+    printf '%s:%s\n' "$BOOTSTRAP_USER" "$BOOTSTRAP_USER_PASSWORD" | chpasswd
+  fi
+}
+
+build_authorized_keys_material() {
+  all_keys=$(mktemp_managed)
+  cleaned_keys=$(mktemp_managed)
+
+  for user_name in root "$BOOTSTRAP_USER"; do
+    home_dir=$(home_for_user "$user_name" 2>/dev/null || true)
+    [ -n "$home_dir" ] || continue
+    authorized_keys="${home_dir}/.ssh/authorized_keys"
+    [ -s "$authorized_keys" ] && cat "$authorized_keys" >>"$all_keys"
+  done
+  [ -s "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" ] && cat "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" >>"$all_keys"
+  [ -n "$BOOTSTRAP_AUTHORIZED_KEYS" ] && printf '%s\n' "$BOOTSTRAP_AUTHORIZED_KEYS" >>"$all_keys"
+
+  tr -d '\r' <"$all_keys" | awk '
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*#/ { next }
+    !seen[$0]++ { print }
+  ' >"$cleaned_keys"
+
+  printf '%s\n' "$cleaned_keys"
+}
+
+install_authorized_keys_for_user() {
+  user_name="$1"
+  key_file="$2"
+  home_dir=$(home_for_user "$user_name")
+  group_name=$(id -gn "$user_name")
+  ssh_dir="${home_dir}/.ssh"
+  authorized_keys="${ssh_dir}/authorized_keys"
+
+  mkdir -p "$ssh_dir"
+  chown "$user_name:$group_name" "$ssh_dir"
+  chmod 0700 "$ssh_dir"
+  atomic_install_file "$key_file" "$authorized_keys" 0600 "$user_name" "$group_name"
+  log "安装 $user_name 的 SSH authorized_keys。"
+}
+
+install_authorized_keys() {
+  cleaned_keys=$(build_authorized_keys_material)
+
+  if [ ! -s "$cleaned_keys" ]; then
+    warn "未发现 SSH 登录密钥；不修改 SSH 登录认证方式。"
+    return
+  fi
+
+  install_authorized_keys_for_user root "$cleaned_keys"
+  install_authorized_keys_for_user "$BOOTSTRAP_USER" "$cleaned_keys"
+  AUTHORIZED_KEYS_INSTALLED=1
+}
+
+configure_sudoers() {
+  sudo_mode="$BOOTSTRAP_SUDO_NOPASSWD"
+  sudoers_file="/etc/sudoers.d/90-${BOOTSTRAP_USER}-bootstrap"
+  temp_sudoers=$(mktemp_managed)
+
+  if [ "$sudo_mode" = auto ]; then
+    if [ "$AUTHORIZED_KEYS_INSTALLED" = 1 ]; then
+      sudo_mode=1
+    else
+      sudo_mode=0
+    fi
+  fi
+
+  if [ "$sudo_mode" != 1 ]; then
+    rm -f -- "$sudoers_file"
+    log "未启用 $BOOTSTRAP_USER 的免密码 sudo。"
+    return
+  fi
+
+  printf '%s ALL=(ALL:ALL) NOPASSWD:ALL\n' "$BOOTSTRAP_USER" >"$temp_sudoers"
+  visudo -cf "$temp_sudoers" >/dev/null
+  atomic_install_file "$temp_sudoers" "$sudoers_file" 0440 root root
+  log "设置 $BOOTSTRAP_USER 的免密码 sudo。"
+}
+
+current_ssh_ports() {
+  sshd=$(sshd_binary 2>/dev/null || true)
+  if [ -n "$sshd" ] && [ -x "$sshd" ]; then
+    "$sshd" -T 2>/dev/null | awk '$1 == "port" { print $2 }' || true
+  fi
+  printf '%s\n' "$BOOTSTRAP_SSH_PORT"
+}
+
+configure_firewall() {
+  [ "$BOOTSTRAP_ENABLE_UFW" = 1 ] || return 0
+
+  ports=$(current_ssh_ports | awk 'NF && !seen[$1]++')
+  temp_firewall=$(mktemp_managed)
+  {
+    printf '#!/bin/sh\n'
+    printf '# 由 Alpine 基础配置脚本管理。\n'
+    printf 'set -eu\n'
+    printf 'HOLLOW_NET_IFACE=%s\n' "$HOLLOW_NET_IFACE"
+    printf 'IPT=$(command -v iptables || true)\n'
+    printf '[ -n "$IPT" ] || exit 0\n'
+    printf '$IPT -N HLWDOT_BOOTSTRAP_INPUT 2>/dev/null || true\n'
+    printf '$IPT -F HLWDOT_BOOTSTRAP_INPUT\n'
+    printf '$IPT -C INPUT -j HLWDOT_BOOTSTRAP_INPUT 2>/dev/null || $IPT -I INPUT 1 -j HLWDOT_BOOTSTRAP_INPUT\n'
+    printf '$IPT -A HLWDOT_BOOTSTRAP_INPUT -i lo -j ACCEPT\n'
+    printf '[ -n "$HOLLOW_NET_IFACE" ] && $IPT -A HLWDOT_BOOTSTRAP_INPUT -i "$HOLLOW_NET_IFACE" -j ACCEPT\n'
+    printf '$IPT -A HLWDOT_BOOTSTRAP_INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n'
+    printf '$IPT -A HLWDOT_BOOTSTRAP_INPUT -p icmp -j ACCEPT\n'
+    while read -r port; do
+      [ -n "$port" ] || continue
+      printf '$IPT -A HLWDOT_BOOTSTRAP_INPUT -p tcp --dport %s -m conntrack --ctstate NEW -j ACCEPT\n' "$port"
+    done <<EOF_PORTS
+$ports
+EOF_PORTS
+    printf '$IPT -A HLWDOT_BOOTSTRAP_INPUT -j DROP\n'
+    printf 'IP6T=$(command -v ip6tables || true)\n'
+    printf '[ -n "$IP6T" ] || exit 0\n'
+    printf '$IP6T -L >/dev/null 2>&1 || exit 0\n'
+    printf '$IP6T -N HLWDOT_BOOTSTRAP_INPUT 2>/dev/null || true\n'
+    printf '$IP6T -F HLWDOT_BOOTSTRAP_INPUT\n'
+    printf '$IP6T -C INPUT -j HLWDOT_BOOTSTRAP_INPUT 2>/dev/null || $IP6T -I INPUT 1 -j HLWDOT_BOOTSTRAP_INPUT\n'
+    printf '$IP6T -A HLWDOT_BOOTSTRAP_INPUT -i lo -j ACCEPT\n'
+    printf '[ -n "$HOLLOW_NET_IFACE" ] && $IP6T -A HLWDOT_BOOTSTRAP_INPUT -i "$HOLLOW_NET_IFACE" -j ACCEPT\n'
+    printf '$IP6T -A HLWDOT_BOOTSTRAP_INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n'
+    printf '$IP6T -A HLWDOT_BOOTSTRAP_INPUT -p ipv6-icmp -j ACCEPT\n'
+    while read -r port; do
+      [ -n "$port" ] || continue
+      printf '$IP6T -A HLWDOT_BOOTSTRAP_INPUT -p tcp --dport %s -m conntrack --ctstate NEW -j ACCEPT\n' "$port"
+    done <<EOF_PORTS
+$ports
+EOF_PORTS
+    printf '$IP6T -A HLWDOT_BOOTSTRAP_INPUT -j DROP\n'
+  } >"$temp_firewall"
+
+  atomic_install_file "$temp_firewall" "$FIREWALL_SCRIPT" 0755 root root
+  log "配置受管 iptables 防火墙：默认拒绝入站，放行 SSH 和 ${HOLLOW_NET_IFACE}。"
+  "$FIREWALL_SCRIPT"
+  rc-update add local default >/dev/null 2>&1 || true
+}
+
+begin_sshd_change() {
+  rm -f -- "$SSHD_DROPIN_BACKUP" "$SSHD_DROPIN_HAD_BACKUP" "$SSHD_CONFIG_BACKUP" "$SSHD_CONFIG_HAD_BACKUP"
+  if [ -f "$SSHD_DROPIN" ]; then
+    cp -p "$SSHD_DROPIN" "$SSHD_DROPIN_BACKUP"
+    touch "$SSHD_DROPIN_HAD_BACKUP"
+  fi
+  if [ -f "$SSHD_CONFIG" ]; then
+    cp -p "$SSHD_CONFIG" "$SSHD_CONFIG_BACKUP"
+    touch "$SSHD_CONFIG_HAD_BACKUP"
+  fi
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$SSHD_CHANGE_IN_PROGRESS"
+}
+
+finish_sshd_change() {
+  rm -f -- "$SSHD_CHANGE_IN_PROGRESS" "$SSHD_DROPIN_BACKUP" "$SSHD_DROPIN_HAD_BACKUP" "$SSHD_CONFIG_BACKUP" "$SSHD_CONFIG_HAD_BACKUP"
+}
+
+ensure_sshd_include() {
+  mkdir -p /etc/ssh/sshd_config.d
+  [ -f "$SSHD_CONFIG" ] || : >"$SSHD_CONFIG"
+  if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "$SSHD_CONFIG"; then
+    return 0
+  fi
+
+  temp_config=$(mktemp_managed)
+  {
+    printf 'Include /etc/ssh/sshd_config.d/*.conf\n'
+    cat "$SSHD_CONFIG"
+  } >"$temp_config"
+  atomic_install_file "$temp_config" "$SSHD_CONFIG" 0644 root root
+}
+
+configure_sshd() {
+  lockdown="$BOOTSTRAP_SSH_LOCKDOWN"
+  temp_sshd=$(mktemp_managed)
+
+  if [ "$lockdown" = auto ]; then
+    if [ "$AUTHORIZED_KEYS_INSTALLED" = 1 ]; then
+      lockdown=1
+    else
+      lockdown=0
+    fi
+  fi
+
+  [ "$lockdown" != 1 ] || [ "$AUTHORIZED_KEYS_INSTALLED" = 1 ] || die "拒绝启用仅密钥 SSH 登录：未发现可用 SSH 登录密钥。"
+  [ "$lockdown" = 1 ] && SSH_LOCKDOWN_ACTIVE=1
+
+  {
+    printf '# 由 Alpine 基础配置脚本管理。\n'
+    printf 'Port %s\n' "$BOOTSTRAP_SSH_PORT"
+    printf 'PubkeyAuthentication yes\n'
+    printf 'MaxAuthTries 3\n'
+    if [ "$lockdown" = 1 ]; then
+      printf 'PermitRootLogin prohibit-password\n'
+      printf 'PasswordAuthentication no\n'
+      printf 'KbdInteractiveAuthentication no\n'
+      printf 'AuthenticationMethods publickey\n'
+      printf 'AllowUsers root %s\n' "$BOOTSTRAP_USER"
+    else
+      printf '# 尚未发现 root/%s 登录密钥，因此暂不启用仅密钥登录策略。\n' "$BOOTSTRAP_USER"
+    fi
+  } >"$temp_sshd"
+
+  log "写入并验证 SSH 配置。"
+  begin_sshd_change
+  ensure_sshd_include
+  atomic_install_file "$temp_sshd" "$SSHD_DROPIN" 0644 root root
+  if ! test_sshd_config; then
+    warn "新的 SSH 配置未通过校验，回滚受管配置。"
+    rollback_sshd_config
+    finish_sshd_change
+    die "写入 $SSHD_DROPIN 后 sshd 配置校验失败。"
+  fi
+
+  rc-update add sshd default >/dev/null
+  rc-service sshd reload >/dev/null 2>&1 || rc-service sshd restart >/dev/null 2>&1 || rc-service sshd start >/dev/null
+  finish_sshd_change
+}
+
+configure_fail2ban() {
+  [ "$BOOTSTRAP_ENABLE_FAIL2BAN" = 1 ] || return 0
+
+  temp_jail=$(mktemp_managed)
+  mkdir -p /var/log
+  touch /var/log/auth.log /var/log/messages
+  chmod 0600 /var/log/auth.log
+  {
+    printf '[sshd]\n'
+    printf 'enabled = true\n'
+    printf 'port = %s\n' "$BOOTSTRAP_SSH_PORT"
+    printf 'backend = polling\n'
+    printf 'logpath = /var/log/auth.log\n'
+    printf '          /var/log/messages\n'
+    printf 'maxretry = 5\n'
+    printf 'findtime = 10m\n'
+    printf 'bantime = 1h\n'
+  } >"$temp_jail"
+
+  log "配置 fail2ban 的 sshd jail。"
+  atomic_install_file "$temp_jail" "$FAIL2BAN_JAIL" 0644 root root
+  fail2ban-client -t >/dev/null
+  rc-update add fail2ban default >/dev/null
+  rc-service fail2ban restart >/dev/null 2>&1 || rc-service fail2ban start >/dev/null
+}
+
+configure_unattended_upgrades() {
+  if [ "$BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES" != 1 ]; then
+    rm -f -- "$APK_AUTO_UPGRADE"
+    return 0
+  fi
+
+  temp_upgrade=$(mktemp_managed)
+  {
+    printf '#!/bin/sh\n'
+    printf '# 由 Alpine 基础配置脚本管理。\n'
+    printf 'set -eu\n'
+    printf 'apk update >/dev/null\n'
+    printf 'apk upgrade --available\n'
+  } >"$temp_upgrade"
+
+  log "配置 daily apk 自动更新。"
+  atomic_install_file "$temp_upgrade" "$APK_AUTO_UPGRADE" 0755 root root
+  rc-update add crond default >/dev/null
+  rc-service crond restart >/dev/null 2>&1 || rc-service crond start >/dev/null
+}
+
+configure_bbr() {
+  [ "$BOOTSTRAP_ENABLE_BBR" = 1 ] || return 0
+
+  if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    if ! modprobe tcp_bbr 2>/dev/null; then
+      warn "当前内核无法加载 tcp_bbr，跳过 BBR 配置。"
+      return 0
+    fi
+  fi
+
+  if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    warn "tcp_bbr 已尝试加载，但内核仍未列出 bbr，跳过 BBR 配置。"
+    return 0
+  fi
+
+  temp_modules=$(mktemp_managed)
+  temp_etc_modules=$(mktemp_managed)
+  temp_conf=$(mktemp_managed)
+  printf 'tcp_bbr\n' >"$temp_modules"
+  {
+    printf 'net.core.default_qdisc = fq\n'
+    printf 'net.ipv4.tcp_congestion_control = bbr\n'
+  } >"$temp_conf"
+
+  mkdir -p /etc/modules-load.d /etc/sysctl.d
+  atomic_install_file "$temp_modules" "$MODULES_BBR" 0644 root root
+  if [ -f /etc/modules ]; then
+    awk '$1 != "tcp_bbr" { print } END { print "tcp_bbr" }' /etc/modules >"$temp_etc_modules"
+  else
+    printf 'tcp_bbr\n' >"$temp_etc_modules"
+  fi
+  atomic_install_file "$temp_etc_modules" /etc/modules 0644 root root
+  atomic_install_file "$temp_conf" "$SYSCTL_BBR" 0644 root root
+  if sysctl -p "$SYSCTL_BBR" >/dev/null; then
+    rc-update add sysctl boot >/dev/null 2>&1 || true
+    BBR_CONFIGURED=1
+  else
+    warn "sysctl 无法应用 BBR 配置，已保留配置文件但本次未标记为已配置。"
+  fi
+}
+
+choose_auto_swap_size_mb() {
+  mem_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+  mem_mb=$(((mem_kb + 1023) / 1024))
+
+  if [ "$mem_mb" -le 2048 ]; then
+    printf '2048\n'
+  else
+    printf '4096\n'
+  fi
+}
+
+parse_swap_size_mb() {
+  raw="$1"
+  case "$raw" in
+    auto)
+      choose_auto_swap_size_mb
+      ;;
+    0)
+      printf '0\n'
+      ;;
+    *[Kk])
+      number=${raw%?}
+      is_uint "$number" || die "BOOTSTRAP_SWAP_SIZE 格式不合法：$raw"
+      printf '%s\n' $(((number + 1023) / 1024))
+      ;;
+    *[Mm])
+      number=${raw%?}
+      is_uint "$number" || die "BOOTSTRAP_SWAP_SIZE 格式不合法：$raw"
+      printf '%s\n' "$number"
+      ;;
+    *[Gg])
+      number=${raw%?}
+      is_uint "$number" || die "BOOTSTRAP_SWAP_SIZE 格式不合法：$raw"
+      printf '%s\n' $((number * 1024))
+      ;;
+    *)
+      is_uint "$raw" || die "BOOTSTRAP_SWAP_SIZE 格式不合法：$raw"
+      printf '%s\n' "$raw"
+      ;;
+  esac
+}
+
+swapfile_has_signature() {
+  swap_path="$1"
+  file -b "$swap_path" 2>/dev/null | grep -qi 'swap file'
+}
+
+ensure_fstab_swap_entry() {
+  swap_path="$1"
+  temp_fstab=$(mktemp_managed)
+  if [ -f /etc/fstab ]; then
+    awk -v swap="$swap_path" '
+      $1 == swap && $3 == "swap" { next }
+      { print }
+      END { print swap " none swap sw 0 0" }
+    ' /etc/fstab >"$temp_fstab"
+  else
+    printf '%s none swap sw 0 0\n' "$swap_path" >"$temp_fstab"
+  fi
+  atomic_install_file "$temp_fstab" /etc/fstab 0644 root root
+}
+
+configure_swapfile() {
+  [ "$BOOTSTRAP_ENABLE_SWAP" = 1 ] || return 0
+
+  size_mb=$(parse_swap_size_mb "$BOOTSTRAP_SWAP_SIZE")
+  SWAP_SIZE_MB="$size_mb"
+  if [ "$size_mb" -eq 0 ]; then
+    log "BOOTSTRAP_SWAP_SIZE=0，跳过 swapfile。"
+    return
+  fi
+  if [ "$BOOTSTRAP_SWAP_SIZE" = auto ]; then
+    log "自动选择 swapfile 大小：${size_mb}M。"
+  fi
+
+  if is_swap_active "$BOOTSTRAP_SWAPFILE"; then
+    log "swapfile 处于启用状态：$BOOTSTRAP_SWAPFILE"
+    ensure_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
+    return
+  fi
+
+  if [ -e "$BOOTSTRAP_SWAPFILE" ]; then
+    [ -f "$BOOTSTRAP_SWAPFILE" ] || die "swapfile 目标存在但不是普通文件：$BOOTSTRAP_SWAPFILE"
+    if swapfile_has_signature "$BOOTSTRAP_SWAPFILE"; then
+      chmod 0600 "$BOOTSTRAP_SWAPFILE"
+      swapon "$BOOTSTRAP_SWAPFILE"
+      ensure_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
+      log "启用已有 swapfile：$BOOTSTRAP_SWAPFILE"
+      return
+    fi
+    die "swapfile 目标已存在但不是 swap 文件，拒绝覆盖：$BOOTSTRAP_SWAPFILE"
+  fi
+
+  swap_dir=$(dirname "$BOOTSTRAP_SWAPFILE")
+  mkdir -p "$swap_dir"
+  available_kb=$(df -kP "$swap_dir" | awk 'NR == 2 { print $4 }')
+  available_mb=$((available_kb / 1024))
+  [ "$available_mb" -gt $((size_mb + 256)) ] || die "磁盘空间不足，无法在 ${swap_dir} 创建 ${size_mb}M swapfile。"
+
+  printf 'swapfile=%s\nsize_mb=%s\n' "$BOOTSTRAP_SWAPFILE" "$size_mb" >"$SWAP_IN_PROGRESS"
+  log "创建 swapfile：${BOOTSTRAP_SWAPFILE}，大小 ${size_mb}M。"
+  dd if=/dev/zero of="$BOOTSTRAP_SWAPFILE" bs=1M count="$size_mb"
+  chmod 0600 "$BOOTSTRAP_SWAPFILE"
+  mkswap "$BOOTSTRAP_SWAPFILE" >/dev/null
+  swapon "$BOOTSTRAP_SWAPFILE"
+  ensure_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
+  rm -f -- "$SWAP_IN_PROGRESS"
+}
+
+enable_core_services() {
+  log "启动基础服务。"
+  rc-update add chronyd default >/dev/null 2>&1 || true
+  rc-service chronyd restart >/dev/null 2>&1 || rc-service chronyd start >/dev/null 2>&1 || warn "chronyd 启动失败。"
+  rc-update add sshd default >/dev/null 2>&1 || true
+}
+
+cleanup_apk() {
+  log "清理 apk 缓存。"
+  apk cache clean >/dev/null 2>&1 || true
+}
+
+write_done_marker() {
+  mkdir -p "$STATE_DIR"
+  {
+    printf 'completed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'user=%s\n' "$BOOTSTRAP_USER"
+    printf 'ssh_lockdown=%s\n' "$SSH_LOCKDOWN_ACTIVE"
+    printf 'firewall=%s\n' "$BOOTSTRAP_ENABLE_UFW"
+    printf 'fail2ban=%s\n' "$BOOTSTRAP_ENABLE_FAIL2BAN"
+    printf 'bbr=%s\n' "$BBR_CONFIGURED"
+    printf 'swapfile=%s\n' "$BOOTSTRAP_SWAPFILE"
+    printf 'swap_size_mb=%s\n' "$SWAP_SIZE_MB"
+  } >"$DONE_MARKER"
+  chmod 0644 "$DONE_MARKER"
+}
+
+print_summary() {
+  log "执行完成。"
+  printf '\n状态：\n'
+  printf '  用户：%s\n' "$BOOTSTRAP_USER"
+  printf '  authorized_keys：%s\n' "$(configured_label "$AUTHORIZED_KEYS_INSTALLED")"
+  printf '  密码 SSH 登录：%s\n' "$(ssh_password_login_label)"
+  printf '  SSH 允许用户：%s\n' "$([ "$SSH_LOCKDOWN_ACTIVE" = 1 ] && printf 'root %s' "$BOOTSTRAP_USER" || printf '未限定')"
+  printf '  防火墙：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_UFW")"
+  printf '  fail2ban：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_FAIL2BAN")"
+  printf '  BBR：%s\n' "$(configured_label "$BBR_CONFIGURED")"
+  printf '  swapfile：%s\n' "$BOOTSTRAP_SWAPFILE"
+  printf '  状态文件：%s\n' "$DONE_MARKER"
+
+  if [ "$AUTHORIZED_KEYS_INSTALLED" != 1 ]; then
+    printf '\n未发现 root/%s authorized_keys，SSH 登录策略保持原状。\n' "$BOOTSTRAP_USER"
+  fi
+}
+
+main() {
+  case "${1:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    '')
+      ;;
+    *)
+      usage
+      die "未知参数：$1"
+      ;;
+  esac
+
+  require_root
+  validate_input
+  require_alpine_openrc
+  setup_state_dir
+  recover_previous_run
+
+  install_packages
+  configure_hostname
+  configure_timezone
+  configure_locale
+  ensure_user
+  install_authorized_keys
+  configure_sudoers
+  configure_firewall
+  configure_sshd
+  configure_fail2ban
+  configure_unattended_upgrades
+  configure_bbr
+  configure_swapfile
+  enable_core_services
+  cleanup_apk
+  write_done_marker
+  print_summary
+}
+
+main "$@"

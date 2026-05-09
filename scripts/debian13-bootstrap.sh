@@ -4,13 +4,19 @@
 # Debian 13 安装完成后的基础初始化：hollow 登录、基础安全防护、
 # BBR、swapfile，以及 Ctrl-C 中断后的可重复执行恢复。
 #
-# 推荐运行方式：
+# 运行方式：
 #   sudo bash scripts/debian13-bootstrap.sh
 #
-# 常用参数通过环境变量传入，例如：
-#   BOOTSTRAP_HOSTNAME=server-new sudo bash scripts/debian13-bootstrap.sh
-#   BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...' sudo bash scripts/debian13-bootstrap.sh
-#   BOOTSTRAP_SWAP_SIZE=2G sudo bash scripts/debian13-bootstrap.sh
+# 运行前配置：
+#   - SSH 登录必须有其一：
+#       BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...'
+#       BOOTSTRAP_AUTHORIZED_KEYS_SOURCE 指向的文件中已有公钥，默认 /root/.ssh/authorized_keys
+#   - 需要固定系统 hostname 时填写 BOOTSTRAP_HOSTNAME；留空时不改 hostname。
+#   - 需要修改 SSH 端口时填写 BOOTSTRAP_SSH_PORT。
+#   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，有可用公钥才禁用密码登录；1 强制禁用，0 保留。
+#   - BOOTSTRAP_SUDO_NOPASSWD=auto 时，有可用公钥才启用免密 sudo；1/0 为强制开关。
+#   - BOOTSTRAP_SWAP_SIZE=auto 时，MemTotal 小于或等于 2GB 创建 2GB swapfile；
+#     MemTotal 大于 2GB 创建 4GB swapfile；0 表示不创建。
 #
 # 中断后再次运行时，脚本会清理受管临时文件、恢复 dpkg/apt 半配置状态，
 # 然后继续完成剩余配置。
@@ -62,8 +68,9 @@ BOOTSTRAP_AUTHORIZED_KEYS="${BOOTSTRAP_AUTHORIZED_KEYS:-}"
 BOOTSTRAP_USER_PASSWORD_HASH="${BOOTSTRAP_USER_PASSWORD_HASH:-}"
 BOOTSTRAP_USER_PASSWORD="${BOOTSTRAP_USER_PASSWORD:-}"
 
-# swapfile 默认开启。大小为 auto 时按内存粗略选择：小内存机器给 2G，
-# 4G 及以上机器给 4G。fstab 中不设置 pri，让内核使用默认 swap 优先级。
+# swapfile 默认开启。BOOTSTRAP_SWAP_SIZE=auto 时按物理内存选择：
+# MemTotal 小于或等于 2GB 创建 2GB swapfile；MemTotal 大于 2GB 创建 4GB swapfile。
+# fstab 中不设置 pri，让内核使用默认 swap 优先级。
 BOOTSTRAP_ENABLE_SWAP="${BOOTSTRAP_ENABLE_SWAP:-1}"
 BOOTSTRAP_SWAPFILE="${BOOTSTRAP_SWAPFILE:-/swapfile}"
 BOOTSTRAP_SWAP_SIZE="${BOOTSTRAP_SWAP_SIZE:-auto}"            # auto、0、1024M、2G
@@ -71,6 +78,7 @@ BOOTSTRAP_SWAP_SIZE="${BOOTSTRAP_SWAP_SIZE:-auto}"            # auto、0、1024M
 AUTHORIZED_KEYS_INSTALLED=0
 SSH_LOCKDOWN_ACTIVE=0
 BBR_CONFIGURED=0
+SWAP_SIZE_MB=0
 TEMP_FILES=()
 
 APT_GET=(
@@ -199,12 +207,12 @@ usage() {
   BOOTSTRAP_USER_PASSWORD_HASH='\$y\$...'
   BOOTSTRAP_ENABLE_SWAP=1
   BOOTSTRAP_SWAPFILE=/swapfile
-  BOOTSTRAP_SWAP_SIZE=auto             # auto、0、1024M、2G
+  BOOTSTRAP_SWAP_SIZE=auto             # auto、0、1024M、2G；auto 为 <=2GB 内存用 2G，>2GB 内存用 4G
 
 说明：
   - 仅支持 Debian 13。
   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，只有找到可用登录密钥并写入 root 与 hollow 后才启用仅密钥登录。
-  - swapfile 默认开启，fstab 不设置 pri，使用系统默认 swap 优先级。
+  - swapfile 默认开启；auto 按物理内存选择 2G 或 4G，fstab 不设置 pri，使用系统默认 swap 优先级。
   - 中断后可重新执行；脚本会先检查上次未完成的受管配置。
 EOF
 }
@@ -924,9 +932,14 @@ configure_swapfile() {
   [[ "$BOOTSTRAP_ENABLE_SWAP" == "1" ]] || return 0
 
   size_mb="$(parse_swap_size_mb "$BOOTSTRAP_SWAP_SIZE")"
+  SWAP_SIZE_MB="$size_mb"
   if ((size_mb == 0)); then
     log "BOOTSTRAP_SWAP_SIZE=0，跳过 swapfile。"
     return
+  fi
+
+  if [[ "$BOOTSTRAP_SWAP_SIZE" == "auto" ]]; then
+    log "自动选择 swapfile 大小：${size_mb}M。"
   fi
 
   if is_swap_active "$BOOTSTRAP_SWAPFILE"; then
@@ -990,6 +1003,7 @@ write_done_marker() {
     printf 'fail2ban=%s\n' "$BOOTSTRAP_ENABLE_FAIL2BAN"
     printf 'bbr=%s\n' "$BBR_CONFIGURED"
     printf 'swapfile=%s\n' "$BOOTSTRAP_SWAPFILE"
+    printf 'swap_size_mb=%s\n' "$SWAP_SIZE_MB"
   } >"$DONE_MARKER"
   chmod 0644 "$DONE_MARKER"
 }
