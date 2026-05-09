@@ -335,12 +335,13 @@ mktemp_managed() {
 
 cleanup_tempfiles() {
   local temp_file
+  local temp_dir="${STATE_DIR}/tmp"
 
   for temp_file in "${TEMP_FILES[@]}"; do
     [[ -e "$temp_file" ]] && rm -rf -- "$temp_file"
   done
-  if [[ -d "$TMP_DIR" ]]; then
-    find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type f -name "${SCRIPT_NAME}.*" -exec rm -f -- {} + 2>/dev/null || true
+  if [[ -d "$temp_dir" ]]; then
+    find "$temp_dir" -mindepth 1 -maxdepth 1 -type f -name "${SCRIPT_NAME}.*" -exec rm -f -- {} + 2>/dev/null || true
   fi
 
   return 0
@@ -842,6 +843,7 @@ install_backup_timer() {
   local timer_file="/etc/systemd/system/hlwdot-${profile}-backup.timer"
   local temp_service
   local temp_timer
+  local backup_packages=(gnupg tar gzip coreutils git rclone sqlite3)
 
   validate_backup_config
   [[ "${BACKUP_ENABLE:-0}" == "1" ]] || {
@@ -852,7 +854,10 @@ install_backup_timer() {
   [[ -r "${SCRIPT_DIR}/vps-backup.sh" ]] || die "找不到备份脚本：${SCRIPT_DIR}/vps-backup.sh"
   [[ -r "${SCRIPT_DIR}/lib/vps-common.sh" ]] || die "找不到共享函数：${SCRIPT_DIR}/lib/vps-common.sh"
 
-  apt_install gnupg tar gzip coreutils git rclone
+  if [[ -n "${BACKUP_HEADSCALE_POSTGRES_URI:-}" ]]; then
+    backup_packages+=(postgresql-client)
+  fi
+  apt_install "${backup_packages[@]}"
   persist_env_file
   install -d -o root -g root -m 0755 /usr/local/lib/hlwdot
   install -o root -g root -m 0644 "${SCRIPT_DIR}/lib/vps-common.sh" /usr/local/lib/hlwdot/vps-common.sh
