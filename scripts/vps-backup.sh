@@ -474,7 +474,7 @@ upload_git() {
     track_tempfile "$worktree"
     log "写入 git 备份仓库：$repo"
     git clone --depth=1 --branch "$branch" "$repo" "$worktree"
-    git -C "$worktree" config user.name "${BACKUP_GIT_USER_NAME:-HlwDot Backup}"
+    git -C "$worktree" config user.name "${BACKUP_GIT_USER_NAME:-VPS Backup}"
     git -C "$worktree" config user.email "${BACKUP_GIT_USER_EMAIL:-backup@${HOST_ID}}"
     target_dir="${worktree}/${subdir}/${HOST_ID}/${PROFILE}"
     install -d -m 0755 "$target_dir"

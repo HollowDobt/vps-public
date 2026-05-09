@@ -133,7 +133,7 @@ split_words() {
 
 name_alias_segment() {
   raw=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  for pair in $(split_words "${NODEGET_HOLLOW_NAME_ALIASES:-center:CNETER}"); do
+  for pair in $(split_words "${NODEGET_HOLLOW_NAME_ALIASES:-}"); do
     key=${pair%%:*}
     value=${pair#*:}
     if [ "$key" = "$raw" ] && [ "$value" != "$pair" ]; then
@@ -204,6 +204,9 @@ setup_state_dir() {
 cleanup_tempfiles() {
   [ -d "$TMP_DIR" ] || return 0
   find "$TMP_DIR" -mindepth 1 -maxdepth 1 -name "${SCRIPT_NAME}.*" -exec rm -rf {} + 2>/dev/null || true
+  rm -f "${TMP_DIR}"/nodeget-data.* "${TMP_DIR}"/nodeget-rpc.* \
+    "${TMP_DIR}"/hollow-status.* "${TMP_DIR}"/hollow-rows.* \
+    "${TMP_DIR}"/hollow-nodes.* 2>/dev/null || true
 }
 
 on_interrupt() {
@@ -312,7 +315,6 @@ merge_nodeget_env_files() {
     : "${NODEGET_STATUS_HOSTNAME:?}"
     : "${NODEGET_CLOUDFLARED_TOKEN:?}"
     [ "${NODEGET_TUNNEL_NAME:-}" = healthy-page ]
-    : "${NODEGET_TUNNEL_ID:?}"
     case "${NODEGET_TUNNEL_CONFIG_ENABLE:-auto}" in
       auto|0|1|true|false) ;;
       *) exit 13 ;;
@@ -348,9 +350,9 @@ merge_nodeget_env_files() {
 }
 
 merge_env() {
-  account_id="${NODEGET_CLOUDFLARE_ACCOUNT_ID:-${CLOUDFLARE_ACCOUNT_ID:-c23c771ead9657dab9308b8601bd02d9}}"
-  NODEGET_DEFAULT_TUNNEL_ID="${NODEGET_DEFAULT_TUNNEL_ID:-52a24e2a-82dc-45b0-ab30-bef831425dfd}"
-  NODEGET_DEFAULT_ZONE_ID="${NODEGET_DEFAULT_ZONE_ID:-8e60f95b7b37991976bb8db6df4ea2de}"
+  account_id="${NODEGET_CLOUDFLARE_ACCOUNT_ID:-${CLOUDFLARE_ACCOUNT_ID:-}}"
+  NODEGET_DEFAULT_TUNNEL_ID="${NODEGET_DEFAULT_TUNNEL_ID:-}"
+  NODEGET_DEFAULT_ZONE_ID="${NODEGET_DEFAULT_ZONE_ID:-}"
   export NODEGET_DEFAULT_TUNNEL_ID
   export NODEGET_DEFAULT_ZONE_ID
   merge_nodeget_env_files "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.example" "$account_id"
@@ -423,7 +425,7 @@ install_packages() {
 
 apply_defaults() {
   HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
-  HEADSCALE_DNS_BASE_DOMAIN="${HEADSCALE_DNS_BASE_DOMAIN:-net.hlwdot.com}"
+  HEADSCALE_DNS_BASE_DOMAIN="${HEADSCALE_DNS_BASE_DOMAIN:-}"
 
   NODEGET_VERSION="${NODEGET_VERSION:-v0.1.4}"
   NODEGET_RELEASE_REPO="${NODEGET_RELEASE_REPO:-GenshinMinecraft/NodeGet}"
@@ -436,7 +438,7 @@ apply_defaults() {
   NODEGET_STATUSSHOW_BUILD_MODE="${NODEGET_STATUSSHOW_BUILD_MODE:-prebuilt}"
   NODEGET_STATUSSHOW_PREBUILT_ARCHIVE="${NODEGET_STATUSSHOW_PREBUILT_ARCHIVE:-${SCRIPT_DIR}/assets/nodeget-statusshow-dist.tar.gz}"
 
-  NODEGET_STATUS_HOSTNAME="${NODEGET_STATUS_HOSTNAME:-nodeget.hlwdot.com}"
+  NODEGET_STATUS_HOSTNAME="${NODEGET_STATUS_HOSTNAME:-}"
   NODEGET_STATUS_SITE_NAME="${NODEGET_STATUS_SITE_NAME:-Hollow Net Status}"
   NODEGET_STATUS_FOOTER="${NODEGET_STATUS_FOOTER:-Powered by NodeGet}"
   NODEGET_STATUS_LOGO="${NODEGET_STATUS_LOGO:-}"
@@ -459,12 +461,17 @@ apply_defaults() {
   NODEGET_TUNNEL_ID="${NODEGET_TUNNEL_ID:-}"
   NODEGET_DNS_CONFIG_TOKEN="${NODEGET_DNS_CONFIG_TOKEN:-}"
   NODEGET_CLOUDFLARE_ACCOUNT_ID="${NODEGET_CLOUDFLARE_ACCOUNT_ID:-${CLOUDFLARE_ACCOUNT_ID:-}}"
-  NODEGET_CLOUDFLARE_ZONE="${NODEGET_CLOUDFLARE_ZONE:-${CLOUDFLARE_ZONE:-hlwdot.com}}"
+  NODEGET_CLOUDFLARE_ZONE="${NODEGET_CLOUDFLARE_ZONE:-${CLOUDFLARE_ZONE:-}}"
   NODEGET_CLOUDFLARE_ZONE_ID="${NODEGET_CLOUDFLARE_ZONE_ID:-${CLOUDFLARE_ZONE_ID:-}}"
 
   NODEGET_HOLLOW_SYNC_INTERVAL_SEC="${NODEGET_HOLLOW_SYNC_INTERVAL_SEC:-30}"
-  NODEGET_HOLLOW_DNS_SUFFIXES="${NODEGET_HOLLOW_DNS_SUFFIXES:-${HEADSCALE_DNS_BASE_DOMAIN},hlwdot.com}"
-  NODEGET_HOLLOW_NAME_ALIASES="${NODEGET_HOLLOW_NAME_ALIASES:-center:CNETER}"
+  if [ -z "${NODEGET_HOLLOW_DNS_SUFFIXES:-}" ]; then
+    NODEGET_HOLLOW_DNS_SUFFIXES="$HEADSCALE_DNS_BASE_DOMAIN"
+    if [ -n "$NODEGET_CLOUDFLARE_ZONE" ]; then
+      NODEGET_HOLLOW_DNS_SUFFIXES="${NODEGET_HOLLOW_DNS_SUFFIXES:+${NODEGET_HOLLOW_DNS_SUFFIXES},}${NODEGET_CLOUDFLARE_ZONE}"
+    fi
+  fi
+  NODEGET_HOLLOW_NAME_ALIASES="${NODEGET_HOLLOW_NAME_ALIASES:-}"
   NODEGET_HOLLOW_PUBLISH_IP="${NODEGET_HOLLOW_PUBLISH_IP:-0}"
 }
 
@@ -1060,6 +1067,11 @@ write_statusshow_config_file() {
 EOF
 }
 
+remove_file_quiet() {
+  [ -n "${1:-}" ] || return 0
+  rm -f -- "$1" 2>/dev/null || true
+}
+
 write_statusshow_config() {
   write_statusshow_config_file "${SRC_DIR}/public/config.json"
 }
@@ -1144,8 +1156,8 @@ STATE_DIR="${STATE_DIR:-/var/lib/hlwdot/nodeget-statusshow}"
 TMP_DIR="${STATE_DIR}/tmp"
 HOLLOW_JSON="${HOLLOW_JSON:-${STATE_DIR}/hollow-nodes.json}"
 NODEGET_HOLLOW_SYNC_INTERVAL_SEC="${NODEGET_HOLLOW_SYNC_INTERVAL_SEC:-30}"
-NODEGET_HOLLOW_DNS_SUFFIXES="${NODEGET_HOLLOW_DNS_SUFFIXES:-net.hlwdot.com,hlwdot.com}"
-NODEGET_HOLLOW_NAME_ALIASES="${NODEGET_HOLLOW_NAME_ALIASES:-center:CNETER}"
+NODEGET_HOLLOW_DNS_SUFFIXES="${NODEGET_HOLLOW_DNS_SUFFIXES:-}"
+NODEGET_HOLLOW_NAME_ALIASES="${NODEGET_HOLLOW_NAME_ALIASES:-}"
 NODEGET_HOLLOW_PUBLISH_IP="${NODEGET_HOLLOW_PUBLISH_IP:-0}"
 NODEGET_POLLER_ENV_FILE="${NODEGET_POLLER_ENV_FILE:-/etc/hlwdot/nodeget-statusshow/hollow-sync.env}"
 NODEGET_SERVER_URL="${NODEGET_SERVER_URL:-http://127.0.0.1:2211}"
@@ -1240,14 +1252,20 @@ nodeget_rpc() {
   params_file="$2"
   output_file="$3"
   payload="${TMP_DIR}/nodeget-rpc.$$.$(printf '%s' "$method" | tr '/ ' '__').json"
-  jq -cn --arg method "$method" --slurpfile params "$params_file" \
-    '{jsonrpc:"2.0",method:$method,params:$params[0],id:1}' >"$payload"
-  curl -fsS --connect-timeout 3 --max-time 8 \
+  if ! jq -cn --arg method "$method" --slurpfile params "$params_file" \
+    '{jsonrpc:"2.0",method:$method,params:$params[0],id:1}' >"$payload"; then
+    remove_file_quiet "$payload"
+    return 1
+  fi
+  if ! curl -fsS --connect-timeout 3 --max-time 8 \
     -H 'Content-Type: application/json' \
     --data @"$payload" \
     "$NODEGET_SERVER_URL" |
-    jq -c 'if .error then empty else .result end' >"$output_file"
-  rm -f "$payload"
+    jq -c 'if .error then empty else .result end' >"$output_file"; then
+    remove_file_quiet "$payload"
+    return 1
+  fi
+  remove_file_quiet "$payload"
   [ -s "$output_file" ]
 }
 
@@ -1273,8 +1291,14 @@ nodeget_collect_files() {
   [ "$NODEGET_PUBLISH_AGENT_DATA" = 1 ] || [ "$NODEGET_PUBLISH_AGENT_DATA" = true ] || return 1
   [ -n "$NODEGET_VISITOR_TOKEN" ] || return 1
   nodeget_write_params "$params_file" '{token:$token}'
-  nodeget_rpc nodeget-server_list_all_agent_uuid "$params_file" "$uuids_file" || return 1
-  jq -e '.uuids and (.uuids | length > 0)' "$uuids_file" >/dev/null || return 1
+  if ! nodeget_rpc nodeget-server_list_all_agent_uuid "$params_file" "$uuids_file"; then
+    remove_file_quiet "$params_file"
+    return 1
+  fi
+  if ! jq -e '.uuids and (.uuids | length > 0)' "$uuids_file" >/dev/null; then
+    remove_file_quiet "$params_file"
+    return 1
+  fi
 
   jq -cn \
     --arg token "$NODEGET_VISITOR_TOKEN" \
@@ -1293,6 +1317,7 @@ nodeget_collect_files() {
     --slurpfile u "$uuids_file" \
     '{token:$token, namespace_key:($u[0].uuids | map(. as $uuid | ["metadata_name","metadata_region","metadata_tags","metadata_hidden","metadata_virtualization","metadata_latitude","metadata_longitude","metadata_order","metadata_price","metadata_price_unit","metadata_price_cycle","metadata_expire_time"] | map({namespace:$uuid,key:.})) | add // [])}' >"$params_file"
   nodeget_rpc kv_get_multi_value "$params_file" "$meta_file" || printf '[]\n' >"$meta_file"
+  remove_file_quiet "$params_file"
   return 0
 }
 
@@ -1968,8 +1993,8 @@ self_test_require_build() {
 }
 
 self_test_names() {
-  NODEGET_HOLLOW_NAME_ALIASES="${NODEGET_HOLLOW_NAME_ALIASES:-center:CNETER}"
-  cases='server999.center=CNETER-999
+  NODEGET_HOLLOW_NAME_ALIASES="${NODEGET_HOLLOW_NAME_ALIASES:-control:CONTROL}"
+  cases='server999.control=CONTROL-999
 server3.headscale=HEADSCALE-3
 server4.edge=EDGE-4'
   printf '%s\n' "$cases" | while IFS='=' read -r input expected; do
@@ -1986,7 +2011,7 @@ self_test_frontend_build() {
   NODEGET_STATUS_SITE_NAME="Self Test"
   NODEGET_STATUS_FOOTER="Self Test"
   NODEGET_STATUS_LOGO=""
-  NODEGET_VISITOR_TOKEN="self-test-key:self-test-secret"
+  NODEGET_VISITOR_TOKEN="self-test-$$:redacted"
   NODEGET_SERVER_NAME="self-test"
 
   mkdir -p "$TMP_DIR" "$APP_ROOT" "$CONFIG_DIR"
@@ -2009,7 +2034,7 @@ self_test_frontend_build() {
   [ -s "${SRC_DIR}/dist/index.html" ] || die "自检构建失败：缺少 dist/index.html"
   grep -R "hollow-nodes.json" "${SRC_DIR}/dist" >/dev/null 2>&1 || die "自检构建失败：产物缺少 hollow-net inventory 逻辑"
   jq -e '.hollow_net_inventory == true and .site_tokens == []' "${SRC_DIR}/public/config.json" >/dev/null
-  ! grep -R "self-test-key:self-test-secret" "${SRC_DIR}/public" "${SRC_DIR}/dist" >/dev/null 2>&1 ||
+  ! grep -R "$NODEGET_VISITOR_TOKEN" "${SRC_DIR}/public" "${SRC_DIR}/dist" >/dev/null 2>&1 ||
     die "自检构建失败：公开产物包含 NodeGet token。"
   log "自检通过：StatusShow 构建。"
 }
@@ -2093,8 +2118,8 @@ self_test_inventory() {
   },
   "Peer": {
     "peer-999": {
-      "HostName": "server999.center",
-      "DNSName": "server999.center.net.example.invalid.",
+      "HostName": "server999.control",
+      "DNSName": "server999.control.tailnet.example.invalid.",
       "TailscaleIPs": ["100.64.0.2"],
       "Online": true
     },
@@ -2112,11 +2137,11 @@ EOF
     HOLLOW_JSON="$out_json" \
     TAILSCALE_STATUS_JSON_FILE="$status_json" \
     NODEGET_HOLLOW_SYNC_ONCE=1 \
-    NODEGET_HOLLOW_DNS_SUFFIXES="net.example.invalid,example.invalid" \
-    NODEGET_HOLLOW_NAME_ALIASES="center:CNETER" \
+    NODEGET_HOLLOW_DNS_SUFFIXES="tailnet.example.invalid,example.invalid" \
+    NODEGET_HOLLOW_NAME_ALIASES="control:CONTROL" \
     sh "$HOLLOW_SYNC_SCRIPT"
   jq -e '
-    ([.nodes[].name] | sort) == (["CNETER-999", "HEADSCALE-3", "EDGE-4"] | sort) and
+    ([.nodes[].name] | sort) == (["CONTROL-999", "HEADSCALE-3", "EDGE-4"] | sort) and
     ([.nodes[] | select(.ip != null)] | length) == 0 and
     (.nodes[] | select(.name == "HEADSCALE-3") | .online) == false
   ' "$out_json" >/dev/null || die "hollow-net inventory 自检失败。"
@@ -2203,15 +2228,20 @@ EOF
 self_test_env_merge() {
   old_env="${TMP_DIR}/old.env"
   example_env="${TMP_DIR}/example.env"
-  cat >"$old_env" <<'EOF'
-FOO=bar
-NODEGET_STATUS_HOSTNAME=nodeget.example.com
-NODEGET_CLOUDFLARED_TOKEN='run-token'
-NODEGET_VISITOR_TOKEN='visitor-key:visitor-secret'
-NODEGET_TUNNEL_CONFIG_ENABLE=0
-# k3s 主节点。
-K3S_VERSION=
-EOF
+  sample_run_value="selftest-run-$$"
+  sample_visitor_value="selftest-user-$$|selftest-pass"
+  sample_account_id="00000000000000000000000000000000"
+  sample_tunnel_id="00000000-0000-4000-8000-000000000000"
+  sample_zone_id="11111111111111111111111111111111"
+  {
+    printf 'FOO=bar\n'
+    printf 'NODEGET_STATUS_HOSTNAME=nodeget.example.com\n'
+    printf 'NODEGET_CLOUDFLARED_TOKEN=%s\n' "$(shell_quote "$sample_run_value")"
+    printf 'NODEGET_VISITOR_TOKEN=%s\n' "$(shell_quote "$sample_visitor_value")"
+    printf 'NODEGET_TUNNEL_CONFIG_ENABLE=0\n'
+    printf '# k3s 主节点。\n'
+    printf 'K3S_VERSION=\n'
+  } >"$old_env"
   cat >"$example_env" <<'EOF'
 # top
 # NodeGet hollow-net 探针页。
@@ -2230,22 +2260,26 @@ NODEGET_CLOUDFLARE_ACCOUNT_ID=
 # k3s 主节点。
 K3S_VERSION=
 EOF
-  NODEGET_DEFAULT_TUNNEL_ID=52a24e2a-82dc-45b0-ab30-bef831425dfd
-  NODEGET_DEFAULT_ZONE_ID=8e60f95b7b37991976bb8db6df4ea2de
-  merge_nodeget_env_files "$old_env" "$example_env" c23c771ead9657dab9308b8601bd02d9
+  NODEGET_DEFAULT_TUNNEL_ID="$sample_tunnel_id"
+  NODEGET_DEFAULT_ZONE_ID="$sample_zone_id"
+  merge_nodeget_env_files "$old_env" "$example_env" "$sample_account_id"
   sh -c '
     set -eu
     . "$1"
+    sample_visitor_value="$2"
+    sample_account_id="$3"
+    sample_tunnel_id="$4"
+    sample_zone_id="$5"
     [ "$FOO" = bar ]
     [ "$NODEGET_STATUS_HOSTNAME" = nodeget.example.com ]
     [ "$NODEGET_STATUS_SITE_NAME" = "Hollow Net Status" ]
-    [ "$NODEGET_VISITOR_TOKEN" = "visitor-key:visitor-secret" ]
+    [ "$NODEGET_VISITOR_TOKEN" = "$sample_visitor_value" ]
     [ "$NODEGET_TUNNEL_CONFIG_ENABLE" = 0 ]
-    [ "$NODEGET_CLOUDFLARE_ACCOUNT_ID" = c23c771ead9657dab9308b8601bd02d9 ]
-    [ "$NODEGET_TUNNEL_ID" = 52a24e2a-82dc-45b0-ab30-bef831425dfd ]
-    [ "$NODEGET_CLOUDFLARE_ZONE_ID" = 8e60f95b7b37991976bb8db6df4ea2de ]
+    [ "$NODEGET_CLOUDFLARE_ACCOUNT_ID" = "$sample_account_id" ]
+    [ "$NODEGET_TUNNEL_ID" = "$sample_tunnel_id" ]
+    [ "$NODEGET_CLOUDFLARE_ZONE_ID" = "$sample_zone_id" ]
     [ "$K3S_VERSION" = "" ]
-  ' sh "$old_env" || die ".env 合并自检失败。"
+  ' sh "$old_env" "$sample_visitor_value" "$sample_account_id" "$sample_tunnel_id" "$sample_zone_id" || die ".env 合并自检失败。"
   [ "$(grep -c '^NODEGET_STATUS_HOSTNAME=' "$old_env")" = 1 ] || die ".env 合并自检失败：重复 NODEGET_STATUS_HOSTNAME。"
   log "自检通过：.env NodeGet 合并。"
 }
