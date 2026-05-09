@@ -83,6 +83,7 @@ ROOT_KEYS_PRESENT=0
 ROOT_KEYS_VALID=0
 USER_KEYS_PRESENT=0
 USER_KEYS_VALID=0
+BOOTSTRAP_COMPLETED=0
 
 log_location() {
   hostname 2>/dev/null || printf 'unknown'
@@ -459,8 +460,10 @@ check_marker_state() {
   local pending=()
 
   if [[ -r "$DONE_MARKER" ]]; then
+    BOOTSTRAP_COMPLETED=1
     add_result OK "完成标记" "$DONE_MARKER"
   else
+    BOOTSTRAP_COMPLETED=0
     add_result FAIL "完成标记" "缺少 $DONE_MARKER"
   fi
 
@@ -473,6 +476,15 @@ check_marker_state() {
   else
     add_result FAIL "未完成标记" "$(join_items '、' "${pending[@]}")"
   fi
+}
+
+check_post_bootstrap_or_skip() {
+  if [[ "$BOOTSTRAP_COMPLETED" == "1" ]]; then
+    return 0
+  fi
+
+  add_result SKIP "受管配置校验" "基础初始化未完成：缺少 done.env；未展开 SSH/UFW/fail2ban/unattended/BBR/swap 逐项校验"
+  return 1
 }
 
 check_package_state() {
@@ -984,6 +996,12 @@ main() {
   check_package_state
   check_user
   check_authorized_keys_user root "root"
+  if ! check_post_bootstrap_or_skip; then
+    check_time_locale
+    check_hostname
+    print_table
+    return
+  fi
   check_authorized_keys_user "$VERIFY_USER" "$VERIFY_USER"
   check_sudoers
   check_sshd

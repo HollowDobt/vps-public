@@ -203,6 +203,9 @@ cleanup_tempfiles() {
   for temp_file in "${TEMP_FILES[@]}"; do
     [[ -e "$temp_file" ]] && rm -f -- "$temp_file"
   done
+  if [[ -d "$TMP_DIR" ]]; then
+    find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type f -name "${SCRIPT_NAME}.*" -exec rm -f -- {} + 2>/dev/null || true
+  fi
 
   return 0
 }
@@ -620,25 +623,35 @@ build_authorized_keys_material() {
   # 合并显式传入的密钥、现有普通登录用户密钥、指定来源文件和 root 密钥。
   # 普通用户密钥排在 root 前面，并跳过 forced-command 密钥，避免 Azure
   # 等云镜像 root authorized_keys 中的提示命令被误当作可登录 shell 的密钥。
-  [[ -n "$BOOTSTRAP_AUTHORIZED_KEYS" ]] && printf '%s\n' "$BOOTSTRAP_AUTHORIZED_KEYS" >>"$all_keys"
+  if [[ -n "$BOOTSTRAP_AUTHORIZED_KEYS" ]]; then
+    printf '%s\n' "$BOOTSTRAP_AUTHORIZED_KEYS" >>"$all_keys"
+  fi
 
   {
     printf '%s\n' "$BOOTSTRAP_USER"
-    [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]] && printf '%s\n' "$SUDO_USER"
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+      printf '%s\n' "$SUDO_USER"
+    fi
     awk -F: '($3 >= 1000 && $3 < 60000 && $1 != "root") { print $1 }' /etc/passwd
   } | awk 'NF && !seen[$0]++' | while read -r user_name; do
     home_dir="$(getent passwd "$user_name" 2>/dev/null | cut -d: -f6)"
     [[ -n "$home_dir" ]] || continue
     authorized_keys="${home_dir}/.ssh/authorized_keys"
-    [[ -s "$authorized_keys" ]] && cat "$authorized_keys" >>"$all_keys"
+    if [[ -s "$authorized_keys" ]]; then
+      cat "$authorized_keys" >>"$all_keys"
+    fi
   done
 
-  [[ -s "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" ]] && cat "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" >>"$all_keys"
+  if [[ -s "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" ]]; then
+    cat "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" >>"$all_keys"
+  fi
 
   home_dir="$(getent passwd root 2>/dev/null | cut -d: -f6)"
   if [[ -n "$home_dir" ]]; then
     authorized_keys="${home_dir}/.ssh/authorized_keys"
-    [[ -s "$authorized_keys" ]] && cat "$authorized_keys" >>"$all_keys"
+    if [[ -s "$authorized_keys" ]]; then
+      cat "$authorized_keys" >>"$all_keys"
+    fi
   fi
 
   tr -d '\r' <"$all_keys" | awk '

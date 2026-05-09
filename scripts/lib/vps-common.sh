@@ -339,6 +339,9 @@ cleanup_tempfiles() {
   for temp_file in "${TEMP_FILES[@]}"; do
     [[ -e "$temp_file" ]] && rm -rf -- "$temp_file"
   done
+  if [[ -d "$TMP_DIR" ]]; then
+    find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type f -name "${SCRIPT_NAME}.*" -exec rm -f -- {} + 2>/dev/null || true
+  fi
 
   return 0
 }
