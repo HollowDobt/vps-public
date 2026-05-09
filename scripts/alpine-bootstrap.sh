@@ -2,7 +2,7 @@
 # Alpine VPS 初装后的首次基础配置脚本。
 #
 # Alpine/OpenRC 环境的基础初始化：hollow 登录、SSH 公钥、安全防护、
-# 自动 apk 更新、BBR、LXC 宿主机 swap 管理，以及中断后的可重复执行恢复。
+# 自动 apk 更新、BBR、LXC 宿主机时间/swap 管理，以及中断后的可重复执行恢复。
 #
 # 运行方式：
 #   sudo sh scripts/alpine-bootstrap.sh
@@ -20,6 +20,7 @@
 #   - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 写入 daily apk upgrade 并启用 crond。
 #   - ALPINE_LXC_MODE=1 时按 LXC 容器执行：swap 由宿主机/cgroup 管理，
 #     脚本不在容器内创建 swapfile/zram。默认值为 1。
+#   - ALPINE_LXC_MODE=1 时系统时钟由宿主机管理，脚本不安装或启动 chronyd。
 #   - ALPINE_LXC_MODE=0 时按 Alpine VM/裸机执行：
 #     BOOTSTRAP_SWAP_SIZE=auto 在 swapfile 所在文件系统可用空间小于或等于 1GB 时创建 128MB；
 #     否则 MemTotal 小于或等于 2GB 创建约等于 MemTotal 的 swapfile，MemTotal 大于 2GB 创建 4GB。
@@ -192,6 +193,7 @@ usage() {
   - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 会写入 daily periodic apk upgrade，并启用 crond。
   - BOOTSTRAP_ENABLE_UFW=1 会放行 SSH 端口和 HOLLOW_NET_IFACE 网卡，其余入站默认拒绝。
   - ALPINE_LXC_MODE=1 时不在容器内配置 swapfile/zram；swap 由宿主机/cgroup 管理。
+  - ALPINE_LXC_MODE=1 时不安装或启动 chronyd；系统时钟由宿主机管理。
   - ALPINE_LXC_MODE=0 时才在 Alpine VM/裸机内配置 swapfile；auto 在磁盘可用空间小于或等于 1GB 时使用 128M，否则按 MemTotal 选择自身内存大小或 4G。
   - fstab 不设置 pri，使用系统默认 swap 优先级。
 EOF
@@ -453,7 +455,10 @@ ensure_community_repo() {
 }
 
 install_packages() {
-  packages='bash bash-completion ca-certificates chrony curl fail2ban file git gnupg htop iproute2 iptables jq kmod logrotate openssh openrc rsync shadow sudo tar tmux tzdata unzip vim wget zip'
+  packages='bash bash-completion ca-certificates curl fail2ban file git gnupg htop iproute2 iptables jq kmod logrotate openssh openrc rsync shadow sudo tar tmux tzdata unzip vim wget zip'
+  if ! is_lxc_container; then
+    packages="$packages chrony"
+  fi
 
   ensure_community_repo
   log "更新 apk 软件源索引。"
@@ -1251,8 +1256,18 @@ configure_swapfile() {
 
 enable_core_services() {
   log "启动基础服务。"
-  rc-update add chronyd default >/dev/null 2>&1 || true
-  rc-service chronyd restart >/dev/null 2>&1 || rc-service chronyd start >/dev/null 2>&1 || warn "chronyd 启动失败。"
+  if is_lxc_container; then
+    if rc-service chronyd status >/dev/null 2>&1; then
+      rc-service chronyd stop >/dev/null 2>&1 || true
+    fi
+    if rc-update show default 2>/dev/null | awk '$1 == "chronyd" { found = 1 } END { exit found ? 0 : 1 }'; then
+      rc-update del chronyd default >/dev/null 2>&1 || true
+    fi
+    log "检测到 LXC 容器，系统时钟由宿主机管理；不启动 chronyd。"
+  else
+    rc-update add chronyd default >/dev/null 2>&1 || true
+    rc-service chronyd restart >/dev/null 2>&1 || rc-service chronyd start >/dev/null 2>&1 || warn "chronyd 启动失败。"
+  fi
   rc-update add sshd default >/dev/null 2>&1 || true
 }
 
