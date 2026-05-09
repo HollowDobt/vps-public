@@ -66,6 +66,7 @@ marker_value() {
 
 MARKER_USER="$(marker_value user 2>/dev/null || true)"
 MARKER_SWAPFILE="$(marker_value swapfile 2>/dev/null || true)"
+MARKER_SWAP_SIZE_MB="$(marker_value swap_size_mb 2>/dev/null || true)"
 MARKER_UFW="$(marker_value ufw 2>/dev/null || true)"
 MARKER_FAIL2BAN="$(marker_value fail2ban 2>/dev/null || true)"
 MARKER_SSH_LOCKDOWN="$(marker_value ssh_lockdown 2>/dev/null || true)"
@@ -299,6 +300,7 @@ check_authorized_keys_user() {
 
 parse_swap_size_mb() {
   local raw="$1"
+  local available_mb="${2:-}"
   local number
   local unit
   local mem_kb
@@ -306,10 +308,19 @@ parse_swap_size_mb() {
 
   case "$raw" in
     auto)
+      if [[ "$MARKER_SWAP_SIZE_MB" =~ ^[0-9]+$ && "$MARKER_SWAP_SIZE_MB" -gt 0 ]]; then
+        printf '%s\n' "$MARKER_SWAP_SIZE_MB"
+        return
+      fi
+      if [[ "$available_mb" =~ ^[0-9]+$ ]] && ((available_mb <= 1024)); then
+        printf '128\n'
+        return
+      fi
       mem_kb="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null || printf '0')"
+      [[ "$mem_kb" =~ ^[0-9]+$ && "$mem_kb" -gt 0 ]] || return 1
       mem_mb=$(((mem_kb + 1023) / 1024))
       if ((mem_mb <= 2048)); then
-        printf '2048\n'
+        printf '%s\n' "$mem_mb"
       else
         printf '4096\n'
       fi
@@ -343,6 +354,18 @@ swap_active_bytes() {
   local swap_path="$1"
 
   swapon --bytes --noheadings --show=NAME,SIZE 2>/dev/null | awk -v path="$swap_path" '$1 == path { print $2; found = 1 } END { exit found ? 0 : 1 }'
+}
+
+swap_available_mb_for_check() {
+  local swap_path="$1"
+  local swap_dir
+  local available_mb
+
+  swap_dir="$(dirname "$swap_path")"
+  [[ -d "$swap_dir" ]] || return 1
+  available_mb="$(df -Pm "$swap_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+  [[ "$available_mb" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$available_mb"
 }
 
 fstab_has_swap_entry() {
@@ -782,6 +805,7 @@ check_bbr() {
 
 check_swap() {
   local expected_mb
+  local available_mb=''
   local active_bytes
   local active_mb
   local mode
@@ -791,7 +815,8 @@ check_swap() {
     return
   fi
 
-  expected_mb="$(parse_swap_size_mb "$VERIFY_SWAP_SIZE" || true)"
+  available_mb="$(swap_available_mb_for_check "$VERIFY_SWAPFILE" || true)"
+  expected_mb="$(parse_swap_size_mb "$VERIFY_SWAP_SIZE" "$available_mb" || true)"
   if [[ -z "$expected_mb" ]]; then
     add_result WARN "swapfile 大小" "无法解析 VERIFY_SWAP_SIZE=$VERIFY_SWAP_SIZE"
     expected_mb=0

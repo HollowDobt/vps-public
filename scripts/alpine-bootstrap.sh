@@ -822,14 +822,14 @@ configure_bbr() {
 
 choose_auto_swap_size_mb() {
   available_mb="${1:-}"
-  mem_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
-  is_uint "$mem_kb" && [ "$mem_kb" -gt 0 ] || die "无法读取 /proc/meminfo 中的 MemTotal。"
-  mem_mb=$(((mem_kb + 1023) / 1024))
-
   if is_uint "$available_mb" && [ "$available_mb" -le 1024 ]; then
     printf '128\n'
     return
   fi
+
+  mem_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+  is_uint "$mem_kb" && [ "$mem_kb" -gt 0 ] || die "无法读取 /proc/meminfo 中的 MemTotal。"
+  mem_mb=$(((mem_kb + 1023) / 1024))
 
   if [ "$mem_mb" -le 2048 ]; then
     printf '%s\n' "$mem_mb"

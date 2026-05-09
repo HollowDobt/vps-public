@@ -855,14 +855,14 @@ choose_auto_swap_size_mb() {
   local mem_kb
   local mem_mb
 
-  mem_kb="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
-  [[ "$mem_kb" =~ ^[0-9]+$ && "$mem_kb" -gt 0 ]] || die "无法读取 /proc/meminfo 中的 MemTotal。"
-  mem_mb=$(((mem_kb + 1023) / 1024))
-
   if [[ "$available_mb" =~ ^[0-9]+$ ]] && ((available_mb <= 1024)); then
     printf '128\n'
     return
   fi
+
+  mem_kb="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+  [[ "$mem_kb" =~ ^[0-9]+$ && "$mem_kb" -gt 0 ]] || die "无法读取 /proc/meminfo 中的 MemTotal。"
+  mem_mb=$(((mem_kb + 1023) / 1024))
 
   if ((mem_mb <= 2048)); then
     printf '%s\n' "$mem_mb"
