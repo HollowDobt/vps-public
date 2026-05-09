@@ -779,29 +779,70 @@ configure_unattended_upgrades() {
   rc-service crond restart >/dev/null 2>&1 || rc-service crond start >/dev/null
 }
 
-configure_bbr() {
-  [ "$BOOTSTRAP_ENABLE_BBR" = 1 ] || return 0
+sysctl_proc_path() {
+  key="$1"
+  printf '/proc/sys/%s\n' "$(printf '%s' "$key" | tr . /)"
+}
 
-  if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-    if ! modprobe tcp_bbr 2>/dev/null; then
-      warn "当前内核无法加载 tcp_bbr，跳过 BBR 配置。"
-      return 0
-    fi
+sysctl_key_exists() {
+  [ -e "$(sysctl_proc_path "$1")" ]
+}
+
+sysctl_read_value() {
+  sysctl -n "$1" 2>/dev/null || true
+}
+
+sysctl_set_checked() {
+  key="$1"
+  value="$2"
+  error_file=$(mktemp_managed)
+
+  if ! sysctl_key_exists "$key"; then
+    warn "当前内核未暴露 ${key}，跳过该 BBR 子项。"
+    return 2
   fi
 
-  if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-    warn "tcp_bbr 已尝试加载，但内核仍未列出 bbr，跳过 BBR 配置。"
+  if sysctl -w "${key}=${value}" >"$error_file" 2>&1; then
     return 0
   fi
 
+  error_text=$(tr '\n' ' ' <"$error_file")
+  warn "无法设置 ${key}=${value}：${error_text:-未知错误}"
+  return 1
+}
+
+configure_bbr() {
+  [ "$BOOTSTRAP_ENABLE_BBR" = 1 ] || return 0
+  congestion_configured=0
+  congestion_supported=0
+  qdisc_configured=0
+  qdisc_supported=0
   temp_modules=$(mktemp_managed)
   temp_etc_modules=$(mktemp_managed)
   temp_conf=$(mktemp_managed)
+
+  if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    if ! modprobe tcp_bbr 2>/dev/null; then
+      warn "当前环境无法加载 tcp_bbr 模块；继续尝试按内核已暴露的 sysctl 项配置 BBR。"
+    fi
+  fi
+
   printf 'tcp_bbr\n' >"$temp_modules"
-  {
-    printf 'net.core.default_qdisc = fq\n'
-    printf 'net.ipv4.tcp_congestion_control = bbr\n'
-  } >"$temp_conf"
+  : >"$temp_conf"
+
+  if sysctl_key_exists net.core.default_qdisc; then
+    qdisc_supported=1
+    printf 'net.core.default_qdisc = fq\n' >>"$temp_conf"
+  else
+    warn "当前内核未暴露 net.core.default_qdisc，不写入该 sysctl 项。"
+  fi
+
+  if sysctl_key_exists net.ipv4.tcp_congestion_control; then
+    congestion_supported=1
+    printf 'net.ipv4.tcp_congestion_control = bbr\n' >>"$temp_conf"
+  else
+    warn "当前内核未暴露 net.ipv4.tcp_congestion_control，无法在容器内切换 TCP 拥塞控制。"
+  fi
 
   mkdir -p /etc/modules-load.d /etc/sysctl.d
   atomic_install_file "$temp_modules" "$MODULES_BBR" 0644 root root
@@ -811,12 +852,31 @@ configure_bbr() {
     printf 'tcp_bbr\n' >"$temp_etc_modules"
   fi
   atomic_install_file "$temp_etc_modules" /etc/modules 0644 root root
-  atomic_install_file "$temp_conf" "$SYSCTL_BBR" 0644 root root
-  if sysctl -p "$SYSCTL_BBR" >/dev/null; then
+
+  if [ -s "$temp_conf" ]; then
+    atomic_install_file "$temp_conf" "$SYSCTL_BBR" 0644 root root
     rc-update add sysctl boot >/dev/null 2>&1 || true
+  else
+    rm -f -- "$SYSCTL_BBR"
+  fi
+
+  if [ "$qdisc_supported" = 1 ] && sysctl_set_checked net.core.default_qdisc fq; then
+    if [ "$(sysctl_read_value net.core.default_qdisc)" = fq ]; then
+      qdisc_configured=1
+    fi
+  fi
+
+  if [ "$congestion_supported" = 1 ] && sysctl_set_checked net.ipv4.tcp_congestion_control bbr; then
+    if [ "$(sysctl_read_value net.ipv4.tcp_congestion_control)" = bbr ]; then
+      congestion_configured=1
+    fi
+  fi
+
+  if [ "$congestion_configured" = 1 ]; then
+    [ "$qdisc_configured" = 1 ] || warn "tcp_congestion_control=bbr 已生效；default_qdisc 未在当前内核命名空间内生效。"
     BBR_CONFIGURED=1
   else
-    warn "sysctl 无法应用 BBR 配置，已保留配置文件但本次未标记为已配置。"
+    warn "BBR 未在当前内核命名空间内生效；已保留 tcp_bbr 开机加载配置。"
   fi
 }
 
@@ -875,6 +935,109 @@ swapfile_has_signature() {
   file -b "$swap_path" 2>/dev/null | grep -qi 'swap file'
 }
 
+swapfile_size_bytes() {
+  wc -c <"$1" | tr -d '[:space:]'
+}
+
+create_swapfile_with_method() {
+  swap_path="$1"
+  size_mb="$2"
+  method="$3"
+  expected_bytes=$((size_mb * 1024 * 1024))
+
+  rm -f -- "$swap_path"
+  : >"$swap_path"
+  chmod 0600 "$swap_path"
+  if command_exists chattr; then
+    chattr +C "$swap_path" >/dev/null 2>&1 || true
+  fi
+
+  case "$method" in
+    fallocate)
+      command_exists fallocate || return 1
+      fallocate -l "${size_mb}M" "$swap_path" 2>/dev/null || return 1
+      ;;
+    zero)
+      dd if=/dev/zero of="$swap_path" bs=1M count="$size_mb"
+      ;;
+    nonzero)
+      dd if=/dev/zero bs=1M count="$size_mb" 2>/dev/null | tr '\000' '\377' >"$swap_path"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  chmod 0600 "$swap_path"
+  actual_bytes=$(swapfile_size_bytes "$swap_path" 2>/dev/null || printf 0)
+  [ "$actual_bytes" = "$expected_bytes" ]
+}
+
+run_swapon_checked() {
+  swap_path="$1"
+  error_file=$(mktemp_managed)
+  SWAPON_ERROR=''
+
+  if swapon "$swap_path" >"$error_file" 2>&1; then
+    return 0
+  fi
+
+  SWAPON_ERROR=$(tr '\n' ' ' <"$error_file")
+  return 1
+}
+
+format_and_swapon_checked() {
+  swap_path="$1"
+  error_file=$(mktemp_managed)
+  SWAPON_ERROR=''
+
+  if ! mkswap "$swap_path" >"$error_file" 2>&1; then
+    SWAPON_ERROR=$(tr '\n' ' ' <"$error_file")
+    return 1
+  fi
+
+  run_swapon_checked "$swap_path"
+}
+
+swapon_error_is_holes() {
+  printf '%s\n' "$SWAPON_ERROR" | grep -Eqi 'hole|holes|洞'
+}
+
+create_and_enable_swapfile() {
+  swap_path="$1"
+  size_mb="$2"
+  first_error=''
+
+  if create_swapfile_with_method "$swap_path" "$size_mb" fallocate; then
+    log "已预分配 swapfile：$swap_path"
+  else
+    create_swapfile_with_method "$swap_path" "$size_mb" zero || {
+      rm -f -- "$swap_path" "$SWAP_IN_PROGRESS"
+      die "无法创建 ${size_mb}M swapfile：$swap_path"
+    }
+  fi
+
+  if format_and_swapon_checked "$swap_path"; then
+    return 0
+  fi
+
+  first_error="$SWAPON_ERROR"
+  if swapon_error_is_holes; then
+    warn "检测到 swapfile 含洞，改用非零字节重新创建：$swap_path"
+    create_swapfile_with_method "$swap_path" "$size_mb" nonzero || {
+      rm -f -- "$swap_path" "$SWAP_IN_PROGRESS"
+      die "当前文件系统无法创建无洞 swapfile：$swap_path"
+    }
+    if format_and_swapon_checked "$swap_path"; then
+      return 0
+    fi
+    first_error="$SWAPON_ERROR"
+  fi
+
+  rm -f -- "$swap_path" "$SWAP_IN_PROGRESS"
+  die "swapon 启用 ${swap_path} 失败：${first_error:-未知错误}"
+}
+
 ensure_fstab_swap_entry() {
   swap_path="$1"
   temp_fstab=$(mktemp_managed)
@@ -921,7 +1084,7 @@ configure_swapfile() {
     [ -f "$BOOTSTRAP_SWAPFILE" ] || die "swapfile 目标存在但不是普通文件：$BOOTSTRAP_SWAPFILE"
     if swapfile_has_signature "$BOOTSTRAP_SWAPFILE"; then
       chmod 0600 "$BOOTSTRAP_SWAPFILE"
-      swapon "$BOOTSTRAP_SWAPFILE"
+      run_swapon_checked "$BOOTSTRAP_SWAPFILE" || die "已有 swapfile 无法启用：${SWAPON_ERROR:-未知错误}"
       ensure_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
       log "启用已有 swapfile：$BOOTSTRAP_SWAPFILE"
       return
@@ -936,10 +1099,7 @@ configure_swapfile() {
 
   printf 'swapfile=%s\nsize_mb=%s\n' "$BOOTSTRAP_SWAPFILE" "$size_mb" >"$SWAP_IN_PROGRESS"
   log "创建 swapfile：${BOOTSTRAP_SWAPFILE}，大小 ${size_mb}M。"
-  dd if=/dev/zero of="$BOOTSTRAP_SWAPFILE" bs=1M count="$size_mb"
-  chmod 0600 "$BOOTSTRAP_SWAPFILE"
-  mkswap "$BOOTSTRAP_SWAPFILE" >/dev/null
-  swapon "$BOOTSTRAP_SWAPFILE"
+  create_and_enable_swapfile "$BOOTSTRAP_SWAPFILE" "$size_mb"
   ensure_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
   rm -f -- "$SWAP_IN_PROGRESS"
 }
