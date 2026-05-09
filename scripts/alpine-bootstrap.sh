@@ -2,7 +2,7 @@
 # Alpine VPS 初装后的首次基础配置脚本。
 #
 # Alpine/OpenRC 环境的基础初始化：hollow 登录、SSH 公钥、安全防护、
-# 自动 apk 更新、BBR、swapfile，以及中断后的可重复执行恢复。
+# 自动 apk 更新、BBR、swapfile/zram fallback，以及中断后的可重复执行恢复。
 #
 # 运行方式：
 #   sudo sh scripts/alpine-bootstrap.sh
@@ -20,6 +20,7 @@
 #   - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 写入 daily apk upgrade 并启用 crond。
 #   - BOOTSTRAP_SWAP_SIZE=auto 时，swapfile 所在文件系统可用空间小于或等于 1GB 创建 128MB；
 #     否则 MemTotal 小于或等于 2GB 创建约等于 MemTotal 的 swapfile，MemTotal 大于 2GB 创建 4GB。
+#   - swapfile 因底层文件系统含洞或不支持而无法启用时，脚本改用 Alpine zram-init swap。
 #   - ALPINE_ENABLE_COMMUNITY_REPO=1 时启用 community 仓库；
 #     ALPINE_COMMUNITY_REPO_URL=auto 时按 main 仓库推导，推导失败时使用官方 CDN。
 
@@ -48,6 +49,7 @@ LOCALE_PROFILE="/etc/profile.d/90-hlwdot-locale.sh"
 FIREWALL_SCRIPT="/etc/local.d/hlwdot-firewall.start"
 MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
 SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
+ZRAM_CONF="/etc/conf.d/zram-init"
 
 BOOTSTRAP_USER="${BOOTSTRAP_USER:-hollow}"
 BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-${VPS_NODE_NAME:-}}"
@@ -76,7 +78,11 @@ ALPINE_COMMUNITY_REPO_URL="${ALPINE_COMMUNITY_REPO_URL:-auto}"
 AUTHORIZED_KEYS_INSTALLED=0
 SSH_LOCKDOWN_ACTIVE=0
 BBR_CONFIGURED=0
+BBR_STATUS=not-run
+BBR_DETAIL=''
 SWAP_SIZE_MB=0
+SWAP_BACKEND=none
+SWAP_ACTIVE_TARGET=''
 TEMP_FILES=''
 
 log_location() {
@@ -811,39 +817,27 @@ sysctl_set_checked() {
   return 1
 }
 
+tcp_bbr_available() {
+  grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null
+}
+
 configure_bbr() {
-  [ "$BOOTSTRAP_ENABLE_BBR" = 1 ] || return 0
-  congestion_configured=0
-  congestion_supported=0
+  if [ "$BOOTSTRAP_ENABLE_BBR" != 1 ]; then
+    BBR_STATUS=disabled
+    BBR_DETAIL='BOOTSTRAP_ENABLE_BBR=0'
+    return 0
+  fi
+
+  log "配置 TCP BBR。"
+  BBR_CONFIGURED=0
+  BBR_STATUS=failed
+  BBR_DETAIL=''
   qdisc_configured=0
-  qdisc_supported=0
   temp_modules=$(mktemp_managed)
   temp_etc_modules=$(mktemp_managed)
   temp_conf=$(mktemp_managed)
 
-  if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-    if ! modprobe tcp_bbr 2>/dev/null; then
-      warn "当前环境无法加载 tcp_bbr 模块；继续尝试按内核已暴露的 sysctl 项配置 BBR。"
-    fi
-  fi
-
   printf 'tcp_bbr\n' >"$temp_modules"
-  : >"$temp_conf"
-
-  if sysctl_key_exists net.core.default_qdisc; then
-    qdisc_supported=1
-    printf 'net.core.default_qdisc = fq\n' >>"$temp_conf"
-  else
-    warn "当前内核未暴露 net.core.default_qdisc，不写入该 sysctl 项。"
-  fi
-
-  if sysctl_key_exists net.ipv4.tcp_congestion_control; then
-    congestion_supported=1
-    printf 'net.ipv4.tcp_congestion_control = bbr\n' >>"$temp_conf"
-  else
-    warn "当前内核未暴露 net.ipv4.tcp_congestion_control，无法在容器内切换 TCP 拥塞控制。"
-  fi
-
   mkdir -p /etc/modules-load.d /etc/sysctl.d
   atomic_install_file "$temp_modules" "$MODULES_BBR" 0644 root root
   if [ -f /etc/modules ]; then
@@ -853,31 +847,51 @@ configure_bbr() {
   fi
   atomic_install_file "$temp_etc_modules" /etc/modules 0644 root root
 
-  if [ -s "$temp_conf" ]; then
-    atomic_install_file "$temp_conf" "$SYSCTL_BBR" 0644 root root
-    rc-update add sysctl boot >/dev/null 2>&1 || true
-  else
-    rm -f -- "$SYSCTL_BBR"
+  if ! tcp_bbr_available; then
+    modprobe tcp_bbr 2>/dev/null || true
   fi
 
-  if [ "$qdisc_supported" = 1 ] && sysctl_set_checked net.core.default_qdisc fq; then
-    if [ "$(sysctl_read_value net.core.default_qdisc)" = fq ]; then
+  if ! sysctl_key_exists net.ipv4.tcp_congestion_control; then
+    BBR_STATUS=unavailable
+    BBR_DETAIL='net.ipv4.tcp_congestion_control is not exposed'
+    die "无法开启 BBR：当前内核命名空间没有 net.ipv4.tcp_congestion_control，脚本无法在这个 Alpine 环境内修改拥塞控制。"
+  fi
+
+  if [ "$(sysctl_read_value net.ipv4.tcp_congestion_control)" != bbr ]; then
+    tcp_bbr_available || die "无法开启 BBR：当前内核的 tcp_available_congestion_control 未列出 bbr。"
+    sysctl_set_checked net.ipv4.tcp_congestion_control bbr || die "无法写入 net.ipv4.tcp_congestion_control=bbr。"
+  fi
+
+  if [ "$(sysctl_read_value net.ipv4.tcp_congestion_control)" != bbr ]; then
+    BBR_STATUS=failed
+    BBR_DETAIL="tcp_congestion_control=$(sysctl_read_value net.ipv4.tcp_congestion_control)"
+    die "BBR 未开启：${BBR_DETAIL}"
+  fi
+
+  if sysctl_key_exists net.core.default_qdisc; then
+    if sysctl_set_checked net.core.default_qdisc fq &&
+      [ "$(sysctl_read_value net.core.default_qdisc)" = fq ]; then
       qdisc_configured=1
     fi
-  fi
-
-  if [ "$congestion_supported" = 1 ] && sysctl_set_checked net.ipv4.tcp_congestion_control bbr; then
-    if [ "$(sysctl_read_value net.ipv4.tcp_congestion_control)" = bbr ]; then
-      congestion_configured=1
-    fi
-  fi
-
-  if [ "$congestion_configured" = 1 ]; then
-    [ "$qdisc_configured" = 1 ] || warn "tcp_congestion_control=bbr 已生效；default_qdisc 未在当前内核命名空间内生效。"
-    BBR_CONFIGURED=1
   else
-    warn "BBR 未在当前内核命名空间内生效；已保留 tcp_bbr 开机加载配置。"
+    log "当前内核未暴露 net.core.default_qdisc，跳过可选队列配置。"
   fi
+
+  {
+    [ "$qdisc_configured" = 1 ] && printf 'net.core.default_qdisc = fq\n'
+    printf 'net.ipv4.tcp_congestion_control = bbr\n'
+  } >"$temp_conf"
+  atomic_install_file "$temp_conf" "$SYSCTL_BBR" 0644 root root
+  rc-update add sysctl boot >/dev/null 2>&1 || rc-update add sysctl default >/dev/null 2>&1 || true
+
+  BBR_CONFIGURED=1
+  BBR_STATUS=active
+  if [ "$qdisc_configured" = 1 ]; then
+    BBR_DETAIL='tcp_congestion_control=bbr; default_qdisc=fq'
+  else
+    BBR_DETAIL='tcp_congestion_control=bbr'
+  fi
+  log "BBR 已开启：${BBR_DETAIL}"
 }
 
 choose_auto_swap_size_mb() {
@@ -933,6 +947,63 @@ parse_swap_size_mb() {
 swapfile_has_signature() {
   swap_path="$1"
   file -b "$swap_path" 2>/dev/null | grep -qi 'swap file'
+}
+
+remove_fstab_swap_entry() {
+  swap_path="$1"
+  temp_fstab=$(mktemp_managed)
+
+  if [ ! -f /etc/fstab ]; then
+    return 0
+  fi
+
+  awk -v swap="$swap_path" '$1 == swap && $3 == "swap" { next } { print }' /etc/fstab >"$temp_fstab"
+  atomic_install_file "$temp_fstab" /etc/fstab 0644 root root
+}
+
+zram_swap_active() {
+  [ -r /proc/swaps ] || return 1
+  awk 'NR > 1 && $1 ~ /^\/dev\/zram[0-9]+$/ && $3 == "partition" { found = 1 } END { exit found ? 0 : 1 }' /proc/swaps
+}
+
+configure_zram_swap() {
+  size_mb="$1"
+  original_error="${2:-}"
+  temp_zram=$(mktemp_managed)
+
+  warn "swapfile 无法在当前文件系统启用，改用 Alpine 官方 zram-init swap。原始错误：${original_error:-未知错误}"
+  rm -f -- "$BOOTSTRAP_SWAPFILE"
+  remove_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
+
+  if ! apk add zram-init >/dev/null; then
+    rm -f -- "$SWAP_IN_PROGRESS"
+    die "无法安装 zram-init，且当前文件系统无法启用 swapfile。"
+  fi
+  {
+    printf 'load_on_start=yes\n'
+    printf 'unload_on_stop=yes\n'
+    printf 'num_devices=1\n'
+    printf 'type0=swap\n'
+    printf 'size0=%s\n' "$size_mb"
+  } >"$temp_zram"
+  atomic_install_file "$temp_zram" "$ZRAM_CONF" 0644 root root
+
+  if ! rc-service zram-init restart >/dev/null 2>&1; then
+    rc-service zram-init start >/dev/null || {
+      rm -f -- "$SWAP_IN_PROGRESS"
+      die "zram-init 服务启动失败。"
+    }
+  fi
+  rc-update add zram-init default >/dev/null
+
+  if ! zram_swap_active; then
+    rm -f -- "$SWAP_IN_PROGRESS"
+    die "zram-init 已配置但 /proc/swaps 未出现 /dev/zram*；请检查 rc-service zram-init status。"
+  fi
+
+  SWAP_BACKEND=zram
+  SWAP_ACTIVE_TARGET=/dev/zram0
+  log "启用 zram swap：${size_mb}M。"
 }
 
 swapfile_size_bytes() {
@@ -1018,6 +1089,8 @@ create_and_enable_swapfile() {
   fi
 
   if format_and_swapon_checked "$swap_path"; then
+    SWAP_BACKEND=file
+    SWAP_ACTIVE_TARGET="$swap_path"
     return 0
   fi
 
@@ -1025,17 +1098,18 @@ create_and_enable_swapfile() {
   if swapon_error_is_holes; then
     warn "检测到 swapfile 含洞，改用非零字节重新创建：$swap_path"
     create_swapfile_with_method "$swap_path" "$size_mb" nonzero || {
-      rm -f -- "$swap_path" "$SWAP_IN_PROGRESS"
-      die "当前文件系统无法创建无洞 swapfile：$swap_path"
+      configure_zram_swap "$size_mb" "$first_error"
+      return 0
     }
     if format_and_swapon_checked "$swap_path"; then
+      SWAP_BACKEND=file
+      SWAP_ACTIVE_TARGET="$swap_path"
       return 0
     fi
     first_error="$SWAPON_ERROR"
   fi
 
-  rm -f -- "$swap_path" "$SWAP_IN_PROGRESS"
-  die "swapon 启用 ${swap_path} 失败：${first_error:-未知错误}"
+  configure_zram_swap "$size_mb" "$first_error"
 }
 
 ensure_fstab_swap_entry() {
@@ -1084,7 +1158,12 @@ configure_swapfile() {
     [ -f "$BOOTSTRAP_SWAPFILE" ] || die "swapfile 目标存在但不是普通文件：$BOOTSTRAP_SWAPFILE"
     if swapfile_has_signature "$BOOTSTRAP_SWAPFILE"; then
       chmod 0600 "$BOOTSTRAP_SWAPFILE"
-      run_swapon_checked "$BOOTSTRAP_SWAPFILE" || die "已有 swapfile 无法启用：${SWAPON_ERROR:-未知错误}"
+      if ! run_swapon_checked "$BOOTSTRAP_SWAPFILE"; then
+        configure_zram_swap "$size_mb" "$SWAPON_ERROR"
+        return
+      fi
+      SWAP_BACKEND=file
+      SWAP_ACTIVE_TARGET="$BOOTSTRAP_SWAPFILE"
       ensure_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
       log "启用已有 swapfile：$BOOTSTRAP_SWAPFILE"
       return
@@ -1100,7 +1179,9 @@ configure_swapfile() {
   printf 'swapfile=%s\nsize_mb=%s\n' "$BOOTSTRAP_SWAPFILE" "$size_mb" >"$SWAP_IN_PROGRESS"
   log "创建 swapfile：${BOOTSTRAP_SWAPFILE}，大小 ${size_mb}M。"
   create_and_enable_swapfile "$BOOTSTRAP_SWAPFILE" "$size_mb"
-  ensure_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
+  if [ "$SWAP_BACKEND" = file ]; then
+    ensure_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
+  fi
   rm -f -- "$SWAP_IN_PROGRESS"
 }
 
@@ -1125,8 +1206,12 @@ write_done_marker() {
     printf 'firewall=%s\n' "$BOOTSTRAP_ENABLE_UFW"
     printf 'fail2ban=%s\n' "$BOOTSTRAP_ENABLE_FAIL2BAN"
     printf 'bbr=%s\n' "$BBR_CONFIGURED"
+    printf 'bbr_status=%s\n' "$BBR_STATUS"
+    printf 'bbr_detail=%s\n' "$BBR_DETAIL"
     printf 'swapfile=%s\n' "$BOOTSTRAP_SWAPFILE"
     printf 'swap_size_mb=%s\n' "$SWAP_SIZE_MB"
+    printf 'swap_backend=%s\n' "$SWAP_BACKEND"
+    printf 'swap_active_target=%s\n' "$SWAP_ACTIVE_TARGET"
   } >"$DONE_MARKER"
   chmod 0644 "$DONE_MARKER"
 }
@@ -1140,8 +1225,8 @@ print_summary() {
   printf '  SSH 允许用户：%s\n' "$([ "$SSH_LOCKDOWN_ACTIVE" = 1 ] && printf 'root %s' "$BOOTSTRAP_USER" || printf '未限定')"
   printf '  防火墙：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_UFW")"
   printf '  fail2ban：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_FAIL2BAN")"
-  printf '  BBR：%s\n' "$(configured_label "$BBR_CONFIGURED")"
-  printf '  swapfile：%s\n' "$BOOTSTRAP_SWAPFILE"
+  printf '  BBR：%s%s\n' "$BBR_STATUS" "$([ -n "$BBR_DETAIL" ] && printf '；%s' "$BBR_DETAIL")"
+  printf '  swap：%s %s\n' "$SWAP_BACKEND" "${SWAP_ACTIVE_TARGET:-未启用}"
   printf '  状态文件：%s\n' "$DONE_MARKER"
 
   if [ "$AUTHORIZED_KEYS_INSTALLED" != 1 ]; then
