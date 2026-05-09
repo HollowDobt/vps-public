@@ -62,12 +62,8 @@ validate_input() {
 
 resolve_defaults() {
   if [[ -z "$FLUX_CLUSTER_NAME" ]]; then
-    if [[ -n "$K3S_NODE_NAME" ]]; then
-      FLUX_CLUSTER_NAME="$K3S_NODE_NAME"
-    elif [[ -n "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
-      FLUX_CLUSTER_NAME="$HEADSCALE_CLIENT_HOSTNAME"
-    elif [[ -n "$BOOTSTRAP_HOSTNAME" ]]; then
-      FLUX_CLUSTER_NAME="$BOOTSTRAP_HOSTNAME"
+    if [[ -n "$VPS_NODE_NAME" ]]; then
+      FLUX_CLUSTER_NAME="$VPS_NODE_NAME"
     else
       FLUX_CLUSTER_NAME="$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf 'k3s')"
     fi

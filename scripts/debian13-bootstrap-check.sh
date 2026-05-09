@@ -8,6 +8,9 @@
 # 推荐运行方式：
 #   sudo bash scripts/debian13-bootstrap-check.sh
 #
+# 脚本会读取 VPS_ENV_FILE 指定文件；未指定时读取 /etc/hlwdot/vps.env 和同目录 .env。
+# 必须填写 VPS_NODE_NAME；校验脚本用它作为系统 hostname 期望值。
+#
 # 非 root 运行时仍会输出结果，但部分需要读取受限文件或服务状态的项目
 # 可能显示为 WARN。
 
@@ -17,6 +20,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 readonly SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
+readonly SCRIPT_DIR
 readonly STATE_DIR="/var/lib/hlwdot/debian13-bootstrap"
 readonly DONE_MARKER="${STATE_DIR}/done.env"
 readonly INTERRUPT_MARKER="${STATE_DIR}/interrupted"
@@ -28,6 +33,48 @@ readonly APT_AUTO_UPGRADES="/etc/apt/apt.conf.d/20auto-upgrades"
 readonly APT_UNATTENDED_UPGRADES="/etc/apt/apt.conf.d/52hlwdot-unattended-upgrades"
 readonly MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
 readonly SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
+
+load_check_env_file() {
+  local env_file="$1"
+  local env_status
+
+  set -a
+  # shellcheck disable=SC1090
+  . "$env_file"
+  env_status=$?
+  set +a
+  return "$env_status"
+}
+
+load_check_env() {
+  local candidate
+  local candidates=()
+
+  if [[ -n "${VPS_ENV_FILE:-}" ]]; then
+    candidates+=("$VPS_ENV_FILE")
+  else
+    candidates+=("/etc/hlwdot/vps.env" "${SCRIPT_DIR}/.env")
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    [[ -r "$candidate" ]] || continue
+    if [[ -z "${VPS_ENV_FILE:-}" && "$candidate" == "${SCRIPT_DIR}/.env" && -r /etc/hlwdot/vps.env ]]; then
+      set -a
+      # shellcheck disable=SC1090
+      . <(awk '
+        /^[[:space:]]*#/ { print; next }
+        /^[[:space:]]*$/ { print; next }
+        /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$/ { next }
+        { print }
+      ' "$candidate")
+      set +a
+    else
+      load_check_env_file "$candidate"
+    fi
+  done
+}
+
+load_check_env
 
 STATUS_LIST=()
 ITEM_LIST=()
@@ -86,6 +133,8 @@ VERIFY_ENABLE_BBR="${VERIFY_ENABLE_BBR:-${BOOTSTRAP_ENABLE_BBR:-${MARKER_BBR:-1}
 VERIFY_ENABLE_SWAP="${VERIFY_ENABLE_SWAP:-${BOOTSTRAP_ENABLE_SWAP:-1}}"
 VERIFY_SWAPFILE="${VERIFY_SWAPFILE:-${BOOTSTRAP_SWAPFILE:-${MARKER_SWAPFILE:-/swapfile}}}"
 VERIFY_SWAP_SIZE="${VERIFY_SWAP_SIZE:-${BOOTSTRAP_SWAP_SIZE:-auto}}"
+VPS_NODE_NAME="${VPS_NODE_NAME:-}"
+VERIFY_HOSTNAME="${VERIFY_HOSTNAME:-$VPS_NODE_NAME}"
 
 usage() {
   cat <<EOF
@@ -856,11 +905,15 @@ check_swap() {
 }
 
 check_hostname() {
-  local expected="${VERIFY_HOSTNAME:-${BOOTSTRAP_HOSTNAME:-${VPS_NODE_NAME:-}}}"
+  local expected="$VERIFY_HOSTNAME"
   local current
 
+  if [[ -z "$VPS_NODE_NAME" ]]; then
+    add_result FAIL "主机名" "必须设置 VPS_NODE_NAME"
+    return
+  fi
   [[ -n "$expected" ]] || {
-    add_result SKIP "主机名" "未指定 VERIFY_HOSTNAME"
+    add_result FAIL "主机名" "未指定 VPS_NODE_NAME"
     return
   }
 

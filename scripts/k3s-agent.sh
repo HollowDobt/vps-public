@@ -31,7 +31,7 @@ usage() {
   或 K3S_TOKEN=共享集群 token
 
 常用配置：
-  K3S_NODE_NAME=server-worker-1
+  VPS_NODE_NAME=server-worker-1
   K3S_SERVER_HOSTNAME=k3s-main.example.com
   K3S_FLANNEL_IFACE=hollow-net
 
@@ -44,9 +44,6 @@ validate_input() {
   [[ "$HOLLOW_NET_IFACE" =~ ^[A-Za-z0-9_.-]+$ ]] || die "HOLLOW_NET_IFACE 包含非法字符。"
   [[ "$K3S_API_PORT" =~ ^[0-9]+$ ]] || die "K3S_API_PORT 必须是数字。"
   validate_bool K3S_UFW_ALLOW "$K3S_UFW_ALLOW"
-  if [[ -n "$HEADSCALE_CLIENT_HOSTNAME" && -n "$K3S_NODE_NAME" && "$HEADSCALE_CLIENT_HOSTNAME" != "$K3S_NODE_NAME" ]]; then
-    die "K3S_NODE_NAME 必须与 HEADSCALE_CLIENT_HOSTNAME 一致。"
-  fi
   if [[ -z "$K3S_SERVER_URL" && -n "$K3S_SERVER_HOSTNAME" ]]; then
     K3S_SERVER_URL="https://${K3S_SERVER_HOSTNAME}:${K3S_API_PORT}"
   fi
@@ -62,15 +59,15 @@ apply_tailnet_defaults() {
   local tailnet_ip
 
   tailnet_ip="$(require_tailnet_ready)"
-  [[ -n "$K3S_NODE_NAME" ]] || K3S_NODE_NAME="${HEADSCALE_CLIENT_HOSTNAME:-$(node_identity_name k3s-agent)}"
+  K3S_NODE_NAME="$VPS_NODE_NAME"
   [[ -n "$K3S_NODE_IP" ]] || K3S_NODE_IP="$tailnet_ip"
   [[ -n "$K3S_FLANNEL_IFACE" ]] || K3S_FLANNEL_IFACE="$HOLLOW_NET_IFACE"
   [[ -n "$K3S_UFW_INTERFACE" ]] || K3S_UFW_INTERFACE="$HOLLOW_NET_IFACE"
 }
 
 persist_k3s_agent_config() {
+  persist_node_identity_defaults
   persist_env_value K3S_SERVER_URL "$K3S_SERVER_URL"
-  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
   persist_env_value K3S_NODE_IP "$K3S_NODE_IP"
   persist_env_value K3S_FLANNEL_IFACE "$K3S_FLANNEL_IFACE"
   persist_env_value K3S_UFW_INTERFACE "$K3S_UFW_INTERFACE"

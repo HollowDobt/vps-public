@@ -29,9 +29,9 @@ usage() {
   sudo bash $SCRIPT_NAME
 
 配置：
+  VPS_NODE_NAME=server-new
   HEADSCALE_SERVER_URL=https://headscale.example.com
   HEADSCALE_AUTHKEY=tskey-auth-...
-  HEADSCALE_CLIENT_HOSTNAME=server-new
 
 说明：
   - HEADSCALE_AUTHKEY 留空时，脚本会输出登录 URL。
@@ -74,20 +74,15 @@ resolve_server_url() {
 }
 
 apply_defaults() {
-  if [[ -z "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
-    HEADSCALE_CLIENT_HOSTNAME="$(node_identity_name vps)"
-  fi
-  if [[ -z "$K3S_NODE_NAME" ]]; then
-    K3S_NODE_NAME="$HEADSCALE_CLIENT_HOSTNAME"
-  fi
+  HEADSCALE_CLIENT_HOSTNAME="$VPS_NODE_NAME"
+  K3S_NODE_NAME="$VPS_NODE_NAME"
 }
 
 persist_client_config() {
+  persist_node_identity_defaults
   persist_env_value HEADSCALE_SERVER_URL "$HEADSCALE_SERVER_URL"
-  persist_env_value HEADSCALE_CLIENT_HOSTNAME "$HEADSCALE_CLIENT_HOSTNAME"
   persist_env_value HOLLOW_NET_IFACE "$HOLLOW_NET_IFACE"
   persist_env_value HOLLOW_NET_UFW_ALLOW "$HOLLOW_NET_UFW_ALLOW"
-  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
 }
 
 install_tailscale() {

@@ -15,6 +15,7 @@ ENV_SOURCES=()
 TEMP_FILES=()
 RUN_MARKER=''
 DONE_MARKER=''
+VPS_IDENTITY_DEFAULTS_USED=0
 
 log_location() {
   hostname 2>/dev/null || printf 'unknown'
@@ -68,10 +69,8 @@ apply_vps_defaults() {
   for group in "$@"; do
     case "$group" in
       identity)
+        VPS_IDENTITY_DEFAULTS_USED=1
         env_default VPS_NODE_NAME ''
-        env_default BOOTSTRAP_HOSTNAME ''
-        env_default HEADSCALE_CLIENT_HOSTNAME ''
-        env_default K3S_NODE_NAME ''
         ;;
       hollow-net)
         env_default HOLLOW_NET_IFACE hollow-net
@@ -234,6 +233,7 @@ prepare_vps_run() {
   setup_state_dir
   install_traps
   load_env
+  normalize_node_identity_defaults
   recover_previous_run
 }
 
@@ -268,33 +268,51 @@ tailnet_already_up() {
 node_identity_name() {
   local fallback="$1"
 
-  if [[ -n "${BOOTSTRAP_HOSTNAME:-}" ]]; then
-    printf '%s\n' "$BOOTSTRAP_HOSTNAME"
-  elif [[ -n "${VPS_NODE_NAME:-}" ]]; then
+  if [[ -n "${VPS_NODE_NAME:-}" ]]; then
     printf '%s\n' "$VPS_NODE_NAME"
   else
     hostname -s 2>/dev/null || hostname 2>/dev/null || printf '%s\n' "$fallback"
   fi
 }
 
+validate_vps_node_name() {
+  [[ -n "${VPS_NODE_NAME:-}" ]] || die "必须设置 VPS_NODE_NAME。"
+  [[ "$VPS_NODE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$ ]] || die "VPS_NODE_NAME 格式不合法。"
+  [[ "$VPS_NODE_NAME" != *..* ]] || die "VPS_NODE_NAME 不能包含连续的点。"
+}
+
+normalize_identity_alias() {
+  local name="$1"
+
+  printf -v "$name" '%s' "$VPS_NODE_NAME"
+}
+
+normalize_node_identity_defaults() {
+  [[ "$VPS_IDENTITY_DEFAULTS_USED" == "1" ]] || return 0
+
+  validate_vps_node_name
+  normalize_identity_alias BOOTSTRAP_HOSTNAME
+  normalize_identity_alias HEADSCALE_CLIENT_HOSTNAME
+  normalize_identity_alias K3S_NODE_NAME
+}
+
 derive_node_identity_defaults() {
   local fallback="$1"
 
-  if [[ -z "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
-    HEADSCALE_CLIENT_HOSTNAME="$(node_identity_name "$fallback")"
-  fi
-  if [[ -z "$K3S_NODE_NAME" ]]; then
-    K3S_NODE_NAME="$HEADSCALE_CLIENT_HOSTNAME"
-  fi
-  if [[ -z "$BOOTSTRAP_HOSTNAME" ]]; then
-    BOOTSTRAP_HOSTNAME="$HEADSCALE_CLIENT_HOSTNAME"
-  fi
+  : "$fallback"
+  normalize_node_identity_defaults
 }
 
 persist_node_identity_defaults() {
-  persist_env_value HEADSCALE_CLIENT_HOSTNAME "$HEADSCALE_CLIENT_HOSTNAME"
-  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
-  persist_env_value BOOTSTRAP_HOSTNAME "$BOOTSTRAP_HOSTNAME"
+  persist_env_value VPS_NODE_NAME "$VPS_NODE_NAME"
+  remove_env_key_from_file /etc/hlwdot/vps.env BOOTSTRAP_HOSTNAME
+  remove_env_key_from_file /etc/hlwdot/vps.env HEADSCALE_CLIENT_HOSTNAME
+  remove_env_key_from_file /etc/hlwdot/vps.env K3S_NODE_NAME
+  if [[ -e "${SCRIPT_DIR}/.env" ]]; then
+    remove_env_key_from_file "${SCRIPT_DIR}/.env" BOOTSTRAP_HOSTNAME
+    remove_env_key_from_file "${SCRIPT_DIR}/.env" HEADSCALE_CLIENT_HOSTNAME
+    remove_env_key_from_file "${SCRIPT_DIR}/.env" K3S_NODE_NAME
+  fi
 }
 
 log_tailnet_ready() {
@@ -473,6 +491,17 @@ persist_env_value_to_file() {
   temp_file="$(mktemp_managed)"
   awk -v key="$key" '$0 !~ "^[[:space:]]*" key "=" { print }' "$target" >"$temp_file"
   printf '%s=%s\n' "$key" "$(shell_quote "$value")" >>"$temp_file"
+  atomic_install_file "$temp_file" "$target" 0600 root root
+}
+
+remove_env_key_from_file() {
+  local target="$1"
+  local key="$2"
+  local temp_file
+
+  [[ -e "$target" ]] || return 0
+  temp_file="$(mktemp_managed)"
+  awk -v key="$key" '$0 !~ "^[[:space:]]*" key "=" { print }' "$target" >"$temp_file"
   atomic_install_file "$temp_file" "$target" 0600 root root
 }
 

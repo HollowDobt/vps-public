@@ -28,8 +28,8 @@ usage() {
   sudo bash $SCRIPT_NAME
 
 常用配置：
+  VPS_NODE_NAME=server3
   K3S_TOKEN=共享集群 token
-  K3S_NODE_NAME=server3
   K3S_SERVER_HOSTNAME=k3s-main.example.com
   K3S_FLANNEL_IFACE=hollow-net
   BACKUP_ENABLE=1
@@ -48,9 +48,6 @@ validate_input() {
   validate_bool K3S_UFW_ALLOW_ETCD "$K3S_UFW_ALLOW_ETCD"
   validate_bool CLOUDFLARE_DNS_PROXIED "$CLOUDFLARE_DNS_PROXIED"
   [[ "$HOLLOW_NET_IFACE" =~ ^[A-Za-z0-9_.-]+$ ]] || die "HOLLOW_NET_IFACE 包含非法字符。"
-  if [[ -n "$HEADSCALE_CLIENT_HOSTNAME" && -n "$K3S_NODE_NAME" && "$HEADSCALE_CLIENT_HOSTNAME" != "$K3S_NODE_NAME" ]]; then
-    die "K3S_NODE_NAME 必须与 HEADSCALE_CLIENT_HOSTNAME 一致。"
-  fi
   [[ "$K3S_ETCD_SNAPSHOT_RETENTION" =~ ^[0-9]+$ ]] || die "K3S_ETCD_SNAPSHOT_RETENTION 必须是数字。"
   [[ "$K3S_API_PORT" =~ ^[0-9]+$ ]] || die "K3S_API_PORT 必须是数字。"
   validate_backup_config
@@ -72,7 +69,7 @@ apply_tailnet_defaults() {
   local public_ip
 
   tailnet_ip="$(require_tailnet_ready)"
-  [[ -n "$K3S_NODE_NAME" ]] || K3S_NODE_NAME="${HEADSCALE_CLIENT_HOSTNAME:-$(node_identity_name k3s-server)}"
+  K3S_NODE_NAME="$VPS_NODE_NAME"
   [[ -n "$K3S_NODE_IP" ]] || K3S_NODE_IP="$tailnet_ip"
   [[ -n "$K3S_ADVERTISE_ADDRESS" ]] || K3S_ADVERTISE_ADDRESS="$tailnet_ip"
   [[ -n "$K3S_FLANNEL_IFACE" ]] || K3S_FLANNEL_IFACE="$HOLLOW_NET_IFACE"
@@ -125,7 +122,7 @@ ensure_token() {
 }
 
 persist_k3s_server_config() {
-  persist_env_value K3S_NODE_NAME "$K3S_NODE_NAME"
+  persist_node_identity_defaults
   persist_env_value K3S_NODE_IP "$K3S_NODE_IP"
   persist_env_value K3S_ADVERTISE_ADDRESS "$K3S_ADVERTISE_ADDRESS"
   persist_env_value K3S_FLANNEL_IFACE "$K3S_FLANNEL_IFACE"

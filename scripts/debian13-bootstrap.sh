@@ -8,10 +8,11 @@
 #   sudo bash scripts/debian13-bootstrap.sh
 #
 # 运行前配置：
+#   - 脚本会读取 VPS_ENV_FILE 指定文件；未指定时读取 /etc/hlwdot/vps.env 和同目录 .env。
 #   - SSH 登录必须有其一：
 #       BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...'
 #       BOOTSTRAP_AUTHORIZED_KEYS_SOURCE 指向的文件中已有公钥，默认 /root/.ssh/authorized_keys
-#   - 需要固定系统 hostname 时填写 BOOTSTRAP_HOSTNAME；留空时不改 hostname。
+#   - 必须填写 VPS_NODE_NAME。
 #   - 需要修改 SSH 端口时填写 BOOTSTRAP_SSH_PORT。
 #   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，有可用公钥才禁用密码登录；1 强制禁用，0 保留。
 #   - BOOTSTRAP_SUDO_NOPASSWD=auto 时，有可用公钥才启用免密 sudo；1/0 为强制开关。
@@ -31,6 +32,8 @@ export DEBIAN_FRONTEND=noninteractive
 # 运行状态目录只保存本脚本自己的标记、备份和临时文件。重新执行时只会清理
 # 这里记录过的受管内容，避免误删用户数据或业务文件。
 readonly SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
+readonly SCRIPT_DIR
 readonly STATE_DIR="/var/lib/hlwdot/debian13-bootstrap"
 readonly TMP_DIR="${STATE_DIR}/tmp"
 readonly DONE_MARKER="${STATE_DIR}/done.env"
@@ -48,10 +51,53 @@ readonly APT_UNATTENDED_UPGRADES="/etc/apt/apt.conf.d/52hlwdot-unattended-upgrad
 readonly MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
 readonly SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
 
+load_bootstrap_env_file() {
+  local env_file="$1"
+  local env_status
+
+  set -a
+  # shellcheck disable=SC1090
+  . "$env_file"
+  env_status=$?
+  set +a
+  return "$env_status"
+}
+
+load_bootstrap_env() {
+  local candidate
+  local candidates=()
+
+  if [[ -n "${VPS_ENV_FILE:-}" ]]; then
+    candidates+=("$VPS_ENV_FILE")
+  else
+    candidates+=("/etc/hlwdot/vps.env" "${SCRIPT_DIR}/.env")
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    [[ -r "$candidate" ]] || continue
+    if [[ -z "${VPS_ENV_FILE:-}" && "$candidate" == "${SCRIPT_DIR}/.env" && -r /etc/hlwdot/vps.env ]]; then
+      set -a
+      # shellcheck disable=SC1090
+      . <(awk '
+        /^[[:space:]]*#/ { print; next }
+        /^[[:space:]]*$/ { print; next }
+        /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$/ { next }
+        { print }
+      ' "$candidate")
+      set +a
+    else
+      load_bootstrap_env_file "$candidate"
+    fi
+  done
+}
+
+load_bootstrap_env
+
 # 默认值尽量贴合新 VPS 的基础使用场景：hollow 是主账号，SSH 端口默认 22。
 # 只有找到可用登录密钥并写入 root 与 hollow 后，才会启用仅密钥 SSH 登录策略。
+VPS_NODE_NAME="${VPS_NODE_NAME:-}"
 BOOTSTRAP_USER="${BOOTSTRAP_USER:-hollow}"
-BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-${VPS_NODE_NAME:-}}"
+BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
 BOOTSTRAP_TIMEZONE="${BOOTSTRAP_TIMEZONE:-Asia/Shanghai}"
 BOOTSTRAP_LOCALE="${BOOTSTRAP_LOCALE:-en_US.UTF-8}"
 BOOTSTRAP_EXTRA_LOCALES="${BOOTSTRAP_EXTRA_LOCALES:-zh_CN.UTF-8}"
@@ -190,8 +236,8 @@ usage() {
   sudo bash $SCRIPT_NAME
 
 可配置环境变量：
+  VPS_NODE_NAME=server-new
   BOOTSTRAP_USER=hollow
-  BOOTSTRAP_HOSTNAME=server-new
   BOOTSTRAP_TIMEZONE=Asia/Shanghai
   BOOTSTRAP_LOCALE=en_US.UTF-8
   BOOTSTRAP_EXTRA_LOCALES=zh_CN.UTF-8
@@ -245,6 +291,11 @@ validate_auto_bool() {
 
 # 输入校验尽早执行，避免错误参数写入系统配置。
 validate_input() {
+  [[ -n "$VPS_NODE_NAME" ]] || die "必须设置 VPS_NODE_NAME。"
+  [[ "$VPS_NODE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$ ]] || die "VPS_NODE_NAME 格式不合法。"
+  [[ "$VPS_NODE_NAME" != *..* ]] || die "VPS_NODE_NAME 不能包含连续的点。"
+  BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
+
   case "$BOOTSTRAP_USER" in
     '' | *[!a-z_0-9-]* | -*)
       die "BOOTSTRAP_USER 必须是简单的小写 Linux 用户名。"

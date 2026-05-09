@@ -80,9 +80,9 @@ usage() {
   sh $SCRIPT_NAME
 
 常用配置：
+  VPS_NODE_NAME=alpine-edge-1
   HEADSCALE_SERVER_URL=https://headscale.hlwdot.com
   HEADSCALE_AUTHKEY=tskey-auth-...
-  HEADSCALE_CLIENT_HOSTNAME=alpine-edge-1
   HOLLOW_NET_IFACE=hollow-net
   ALPINE_TAILSCALE_INSTALL_SOURCE=auto
   ALPINE_TAILSCALE_MIN_VERSION=1.74.0
@@ -174,6 +174,14 @@ validate_bool() {
 }
 
 validate_input() {
+  VPS_NODE_NAME="${VPS_NODE_NAME:-}"
+  [ -n "$VPS_NODE_NAME" ] || die "必须设置 VPS_NODE_NAME。"
+  printf '%s\n' "$VPS_NODE_NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$' || die "VPS_NODE_NAME 格式不合法。"
+  case "$VPS_NODE_NAME" in
+    *..*) die "VPS_NODE_NAME 不能包含连续的点。" ;;
+  esac
+  HEADSCALE_CLIENT_HOSTNAME="$VPS_NODE_NAME"
+
   case "${HEADSCALE_SERVER_URL}" in
     http://*|https://*) ;;
     *) die "HEADSCALE_SERVER_URL 必须以 http:// 或 https:// 开头。" ;;
@@ -224,10 +232,11 @@ require_alpine() {
 }
 
 apply_defaults() {
+  VPS_NODE_NAME="${VPS_NODE_NAME:-}"
   HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-https://headscale.hlwdot.com}"
   HEADSCALE_SERVER_HOSTNAME="${HEADSCALE_SERVER_HOSTNAME:-}"
   HEADSCALE_AUTHKEY="${HEADSCALE_AUTHKEY:-}"
-  HEADSCALE_CLIENT_HOSTNAME="${HEADSCALE_CLIENT_HOSTNAME:-${VPS_NODE_NAME:-$(hostname 2>/dev/null || printf 'alpine-vps')}}"
+  HEADSCALE_CLIENT_HOSTNAME="$VPS_NODE_NAME"
   HEADSCALE_ACCEPT_DNS="${HEADSCALE_ACCEPT_DNS:-true}"
   HEADSCALE_ADVERTISE_ROUTES="${HEADSCALE_ADVERTISE_ROUTES:-}"
   HEADSCALE_ENABLE_TS_SSH="${HEADSCALE_ENABLE_TS_SSH:-0}"

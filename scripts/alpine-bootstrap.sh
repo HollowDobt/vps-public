@@ -8,10 +8,11 @@
 #   sudo sh scripts/alpine-bootstrap.sh
 #
 # 运行前配置：
+#   - 脚本会读取 VPS_ENV_FILE 指定文件；未指定时读取 /etc/hlwdot/vps.env 和同目录 .env。
 #   - SSH 登录必须有其一：
 #       BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...'
 #       BOOTSTRAP_AUTHORIZED_KEYS_SOURCE 指向的文件中已有公钥，默认 /root/.ssh/authorized_keys
-#   - 需要固定系统 hostname 时填写 BOOTSTRAP_HOSTNAME；留空时不改 hostname。
+#   - 必须填写 VPS_NODE_NAME。
 #   - 需要修改 SSH 端口时填写 BOOTSTRAP_SSH_PORT。
 #   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，有可用公钥才禁用密码登录；1 强制禁用，0 保留。
 #   - BOOTSTRAP_SUDO_NOPASSWD=auto 时，有可用公钥才启用免密 sudo；1/0 为强制开关。
@@ -35,6 +36,7 @@ PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
 SCRIPT_NAME=$(basename "$0")
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 STATE_DIR="/var/lib/hlwdot/alpine-bootstrap"
 TMP_DIR="${STATE_DIR}/tmp"
 DONE_MARKER="${STATE_DIR}/done.env"
@@ -55,8 +57,52 @@ MODULES_BBR="/etc/modules-load.d/90-hlwdot-bbr.conf"
 SYSCTL_BBR="/etc/sysctl.d/90-hlwdot-bbr.conf"
 ZRAM_CONF="/etc/conf.d/zram-init"
 
+load_bootstrap_env_file() {
+  env_file="$1"
+
+  set -a
+  # shellcheck disable=SC1090
+  . "$env_file"
+  env_status=$?
+  set +a
+  return "$env_status"
+}
+
+load_bootstrap_env() {
+  if [ -n "${VPS_ENV_FILE:-}" ]; then
+    env_candidates=$VPS_ENV_FILE
+  else
+    env_candidates="/etc/hlwdot/vps.env
+${SCRIPT_DIR}/.env"
+  fi
+
+  old_ifs=$IFS
+  IFS='
+'
+  for env_candidate in $env_candidates; do
+    [ -r "$env_candidate" ] || continue
+    if [ -z "${VPS_ENV_FILE:-}" ] && [ "$env_candidate" = "${SCRIPT_DIR}/.env" ] && [ -r /etc/hlwdot/vps.env ]; then
+      filtered_env=$(mktemp "/tmp/${SCRIPT_NAME}.env.XXXXXX")
+      awk '
+        /^[[:space:]]*#/ { print; next }
+        /^[[:space:]]*$/ { print; next }
+        /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$/ { next }
+        { print }
+      ' "$env_candidate" >"$filtered_env"
+      load_bootstrap_env_file "$filtered_env"
+      rm -f -- "$filtered_env"
+    else
+      load_bootstrap_env_file "$env_candidate"
+    fi
+  done
+  IFS=$old_ifs
+}
+
+load_bootstrap_env
+
+VPS_NODE_NAME="${VPS_NODE_NAME:-}"
 BOOTSTRAP_USER="${BOOTSTRAP_USER:-hollow}"
-BOOTSTRAP_HOSTNAME="${BOOTSTRAP_HOSTNAME:-${VPS_NODE_NAME:-}}"
+BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
 BOOTSTRAP_TIMEZONE="${BOOTSTRAP_TIMEZONE:-Asia/Shanghai}"
 BOOTSTRAP_LOCALE="${BOOTSTRAP_LOCALE:-en_US.UTF-8}"
 BOOTSTRAP_EXTRA_LOCALES="${BOOTSTRAP_EXTRA_LOCALES:-zh_CN.UTF-8}"
@@ -163,8 +209,8 @@ usage() {
   sh $SCRIPT_NAME
 
 可配置环境变量：
+  VPS_NODE_NAME=server-new
   BOOTSTRAP_USER=hollow
-  BOOTSTRAP_HOSTNAME=server-new
   BOOTSTRAP_TIMEZONE=Asia/Shanghai
   BOOTSTRAP_LOCALE=en_US.UTF-8
   BOOTSTRAP_EXTRA_LOCALES=zh_CN.UTF-8
@@ -222,6 +268,13 @@ validate_auto_bool() {
 }
 
 validate_input() {
+  [ -n "$VPS_NODE_NAME" ] || die "必须设置 VPS_NODE_NAME。"
+  printf '%s\n' "$VPS_NODE_NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$' || die "VPS_NODE_NAME 格式不合法。"
+  case "$VPS_NODE_NAME" in
+    *..*) die "VPS_NODE_NAME 不能包含连续的点。" ;;
+  esac
+  BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
+
   case "$BOOTSTRAP_USER" in
     ''|*[!a-z_0-9-]*|-*) die "BOOTSTRAP_USER 必须是简单的小写 Linux 用户名。" ;;
   esac
