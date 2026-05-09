@@ -1,7 +1,7 @@
 #!/bin/sh
 # Alpine VPS 初装后的首次基础配置脚本。
 #
-# Alpine/OpenRC 环境的基础初始化：hollow 登录、SSH 公钥、安全防护、
+# Alpine/OpenRC 环境的基础初始化：BOOTSTRAP_USER 登录、SSH 公钥、安全防护、
 # 自动 apk 更新、BBR、LXC 宿主机时间/swap 管理，以及中断后的可重复执行恢复。
 #
 # 运行方式：
@@ -9,9 +9,10 @@
 #
 # 运行前配置：
 #   - 脚本会读取 VPS_ENV_FILE 指定文件；未指定时读取 /etc/hlwdot/vps.env 和同目录 .env。
-#   - SSH 登录必须有其一：
+#   - SSH 登录公钥来源必须有其一：
 #       BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...'
 #       BOOTSTRAP_AUTHORIZED_KEYS_SOURCE 指向的文件中已有公钥，默认 /root/.ssh/authorized_keys
+#       root、BOOTSTRAP_USER、SUDO_USER 或现有 UID>=1000 用户已有 authorized_keys
 #   - 必须填写 VPS_NODE_NAME。
 #   - 需要修改 SSH 端口时填写 BOOTSTRAP_SSH_PORT。
 #   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，有可用公钥才禁用密码登录；1 强制禁用，0 保留。
@@ -611,19 +612,52 @@ build_authorized_keys_material() {
   all_keys=$(mktemp_managed)
   cleaned_keys=$(mktemp_managed)
 
-  for user_name in root "$BOOTSTRAP_USER"; do
+  # 普通用户密钥排在 root 前面，并跳过 forced-command 密钥，避免云镜像
+  # root authorized_keys 中的提示命令被误当作可登录 shell 的密钥。
+  [ -n "$BOOTSTRAP_AUTHORIZED_KEYS" ] && printf '%s\n' "$BOOTSTRAP_AUTHORIZED_KEYS" >>"$all_keys"
+
+  {
+    printf '%s\n' "$BOOTSTRAP_USER"
+    [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-}" != root ] && printf '%s\n' "$SUDO_USER"
+    awk -F: '($3 >= 1000 && $3 < 60000 && $1 != "root") { print $1 }' /etc/passwd
+  } | awk 'NF && !seen[$0]++' | while read -r user_name; do
     home_dir=$(home_for_user "$user_name" 2>/dev/null || true)
     [ -n "$home_dir" ] || continue
     authorized_keys="${home_dir}/.ssh/authorized_keys"
     [ -s "$authorized_keys" ] && cat "$authorized_keys" >>"$all_keys"
   done
+
   [ -s "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" ] && cat "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" >>"$all_keys"
-  [ -n "$BOOTSTRAP_AUTHORIZED_KEYS" ] && printf '%s\n' "$BOOTSTRAP_AUTHORIZED_KEYS" >>"$all_keys"
+
+  home_dir=$(home_for_user root 2>/dev/null || true)
+  if [ -n "$home_dir" ]; then
+    authorized_keys="${home_dir}/.ssh/authorized_keys"
+    [ -s "$authorized_keys" ] && cat "$authorized_keys" >>"$all_keys"
+  fi
 
   tr -d '\r' <"$all_keys" | awk '
+    function is_key_type(value) {
+      return value ~ /^(ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)$/
+    }
+    function has_forced_command() {
+      return !is_key_type($1) && $1 ~ /(^|,)command=/
+    }
+    function key_id(    i, key_type) {
+      for (i = 1; i <= NF; i++) {
+        key_type = $i
+        if (is_key_type(key_type) && i < NF) {
+          return key_type " " $(i + 1)
+        }
+      }
+      return $0
+    }
     /^[[:space:]]*$/ { next }
     /^[[:space:]]*#/ { next }
-    !seen[$0]++ { print }
+    has_forced_command() { next }
+    {
+      id = key_id()
+      if (!seen[id]++) { print }
+    }
   ' >"$cleaned_keys"
 
   printf '%s\n' "$cleaned_keys"
@@ -798,9 +832,9 @@ configure_sshd() {
       printf 'PasswordAuthentication no\n'
       printf 'KbdInteractiveAuthentication no\n'
       printf 'AuthenticationMethods publickey\n'
-      printf 'AllowUsers root %s\n' "$BOOTSTRAP_USER"
+      printf '# 不写 AllowUsers，避免排除云厂商默认账号或现有救援账号。\n'
     else
-      printf '# 尚未发现 root/%s 登录密钥，因此暂不启用仅密钥登录策略。\n' "$BOOTSTRAP_USER"
+      printf '# 尚未发现 root/%s/现有登录用户密钥，因此暂不启用仅密钥登录策略。\n' "$BOOTSTRAP_USER"
     fi
   } >"$temp_sshd"
 
@@ -1354,7 +1388,7 @@ print_summary() {
   printf '  用户：%s\n' "$BOOTSTRAP_USER"
   printf '  authorized_keys：%s\n' "$(configured_label "$AUTHORIZED_KEYS_INSTALLED")"
   printf '  密码 SSH 登录：%s\n' "$(ssh_password_login_label)"
-  printf '  SSH 允许用户：%s\n' "$([ "$SSH_LOCKDOWN_ACTIVE" = 1 ] && printf 'root %s' "$BOOTSTRAP_USER" || printf '未限定')"
+  printf '  SSH 用户限制：未限定\n'
   printf '  防火墙：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_UFW")"
   printf '  fail2ban：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_FAIL2BAN")"
   printf '  BBR：%s%s\n' "$BBR_STATUS" "$([ -n "$BBR_DETAIL" ] && printf '；%s' "$BBR_DETAIL")"
@@ -1362,7 +1396,7 @@ print_summary() {
   printf '  状态文件：%s\n' "$DONE_MARKER"
 
   if [ "$AUTHORIZED_KEYS_INSTALLED" != 1 ]; then
-    printf '\n未发现 root/%s authorized_keys，SSH 登录策略保持原状。\n' "$BOOTSTRAP_USER"
+    printf '\n未发现 root/%s/现有登录用户 authorized_keys，SSH 登录策略保持原状。\n' "$BOOTSTRAP_USER"
   fi
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Debian 13 VPS 刷写系统后的首次基础配置脚本。
 #
-# Debian 13 安装完成后的基础初始化：hollow 登录、基础安全防护、
+# Debian 13 安装完成后的基础初始化：BOOTSTRAP_USER 登录、基础安全防护、
 # BBR、swapfile，以及 Ctrl-C 中断后的可重复执行恢复。
 #
 # 运行方式：
@@ -9,9 +9,10 @@
 #
 # 运行前配置：
 #   - 脚本会读取 VPS_ENV_FILE 指定文件；未指定时读取 /etc/hlwdot/vps.env 和同目录 .env。
-#   - SSH 登录必须有其一：
+#   - SSH 登录公钥来源必须有其一：
 #       BOOTSTRAP_AUTHORIZED_KEYS='ssh-ed25519 AAAA...'
 #       BOOTSTRAP_AUTHORIZED_KEYS_SOURCE 指向的文件中已有公钥，默认 /root/.ssh/authorized_keys
+#       root、BOOTSTRAP_USER、SUDO_USER 或现有 UID>=1000 用户已有 authorized_keys
 #   - 必须填写 VPS_NODE_NAME。
 #   - 需要修改 SSH 端口时填写 BOOTSTRAP_SSH_PORT。
 #   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，有可用公钥才禁用密码登录；1 强制禁用，0 保留。
@@ -93,8 +94,8 @@ load_bootstrap_env() {
 
 load_bootstrap_env
 
-# 默认值尽量贴合新 VPS 的基础使用场景：hollow 是主账号，SSH 端口默认 22。
-# 只有找到可用登录密钥并写入 root 与 hollow 后，才会启用仅密钥 SSH 登录策略。
+# 默认值尽量贴合新 VPS 的基础使用场景：BOOTSTRAP_USER 是主账号，SSH 端口默认 22。
+# 只有找到可用登录密钥并写入 root 与 BOOTSTRAP_USER 后，才会启用仅密钥 SSH 登录策略。
 VPS_NODE_NAME="${VPS_NODE_NAME:-}"
 BOOTSTRAP_USER="${BOOTSTRAP_USER:-hollow}"
 BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
@@ -258,7 +259,7 @@ usage() {
 
 说明：
   - 仅支持 Debian 13。
-  - BOOTSTRAP_SSH_LOCKDOWN=auto 时，只有找到可用登录密钥并写入 root 与 hollow 后才启用仅密钥登录。
+  - BOOTSTRAP_SSH_LOCKDOWN=auto 时，只有找到可用登录密钥并写入 root 与 BOOTSTRAP_USER 后才启用仅密钥登录。
   - swapfile 默认开启；auto 在磁盘可用空间小于或等于 1GB 时使用 128M，否则按 MemTotal 选择自身内存大小或 4G。
   - fstab 不设置 pri，使用系统默认 swap 优先级。
   - 中断后可重新执行；脚本会先检查上次未完成的受管配置。
@@ -623,21 +624,53 @@ build_authorized_keys_material() {
   all_keys="$(mktemp_managed)"
   cleaned_keys="$(mktemp_managed)"
 
-  # 合并 root 与 hollow 现有密钥，再加入显式传入的密钥。重复运行时保留
-  # 手工追加过的登录密钥，并把同一组密钥同步到两个允许登录的账号。
-  for user_name in root hollow; do
+  # 合并显式传入的密钥、现有普通登录用户密钥、指定来源文件和 root 密钥。
+  # 普通用户密钥排在 root 前面，并跳过 forced-command 密钥，避免 Azure
+  # 等云镜像 root authorized_keys 中的提示命令被误当作可登录 shell 的密钥。
+  [[ -n "$BOOTSTRAP_AUTHORIZED_KEYS" ]] && printf '%s\n' "$BOOTSTRAP_AUTHORIZED_KEYS" >>"$all_keys"
+
+  {
+    printf '%s\n' "$BOOTSTRAP_USER"
+    [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]] && printf '%s\n' "$SUDO_USER"
+    awk -F: '($3 >= 1000 && $3 < 60000 && $1 != "root") { print $1 }' /etc/passwd
+  } | awk 'NF && !seen[$0]++' | while read -r user_name; do
     home_dir="$(getent passwd "$user_name" 2>/dev/null | cut -d: -f6)"
     [[ -n "$home_dir" ]] || continue
     authorized_keys="${home_dir}/.ssh/authorized_keys"
     [[ -s "$authorized_keys" ]] && cat "$authorized_keys" >>"$all_keys"
   done
+
   [[ -s "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" ]] && cat "$BOOTSTRAP_AUTHORIZED_KEYS_SOURCE" >>"$all_keys"
-  [[ -n "$BOOTSTRAP_AUTHORIZED_KEYS" ]] && printf '%s\n' "$BOOTSTRAP_AUTHORIZED_KEYS" >>"$all_keys"
+
+  home_dir="$(getent passwd root 2>/dev/null | cut -d: -f6)"
+  if [[ -n "$home_dir" ]]; then
+    authorized_keys="${home_dir}/.ssh/authorized_keys"
+    [[ -s "$authorized_keys" ]] && cat "$authorized_keys" >>"$all_keys"
+  fi
 
   tr -d '\r' <"$all_keys" | awk '
+    function is_key_type(value) {
+      return value ~ /^(ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)$/
+    }
+    function has_forced_command() {
+      return !is_key_type($1) && $1 ~ /(^|,)command=/
+    }
+    function key_id(    i, key_type) {
+      for (i = 1; i <= NF; i++) {
+        key_type = $i
+        if (is_key_type(key_type) && i < NF) {
+          return key_type " " $(i + 1)
+        }
+      }
+      return $0
+    }
     /^[[:space:]]*$/ { next }
     /^[[:space:]]*#/ { next }
-    !seen[$0]++ { print }
+    has_forced_command() { next }
+    {
+      id = key_id()
+      if (!seen[id]++) { print }
+    }
   ' >"$cleaned_keys"
 
   printf '%s\n' "$cleaned_keys"
@@ -672,7 +705,7 @@ install_authorized_keys() {
   fi
 
   install_authorized_keys_for_user root "$cleaned_keys"
-  install_authorized_keys_for_user hollow "$cleaned_keys"
+  install_authorized_keys_for_user "$BOOTSTRAP_USER" "$cleaned_keys"
   AUTHORIZED_KEYS_INSTALLED=1
 }
 
@@ -789,9 +822,9 @@ configure_sshd() {
       printf 'PasswordAuthentication no\n'
       printf 'KbdInteractiveAuthentication no\n'
       printf 'AuthenticationMethods publickey\n'
-      printf 'AllowUsers root hollow\n'
+      printf '# 不写 AllowUsers，避免排除云厂商默认账号或现有救援账号。\n'
     else
-      printf '# 尚未发现 root/hollow 登录密钥，因此暂不启用仅密钥登录策略。\n'
+      printf '# 尚未发现 root/%s/现有登录用户密钥，因此暂不启用仅密钥登录策略。\n' "$BOOTSTRAP_USER"
     fi
   } >"$temp_sshd"
 
@@ -1081,7 +1114,7 @@ print_summary() {
   printf '  用户：%s\n' "$BOOTSTRAP_USER"
   printf '  authorized_keys：%s\n' "$(configured_label "$AUTHORIZED_KEYS_INSTALLED")"
   printf '  密码 SSH 登录：%s\n' "$(ssh_password_login_label)"
-  printf '  SSH 允许用户：%s\n' "$([[ "$SSH_LOCKDOWN_ACTIVE" == "1" ]] && printf 'root hollow' || printf '未限定')"
+  printf '  SSH 用户限制：未限定\n'
   printf '  UFW：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_UFW")"
   printf '  fail2ban：%s\n' "$(enabled_label "$BOOTSTRAP_ENABLE_FAIL2BAN")"
   printf '  BBR：%s\n' "$(configured_label "$BBR_CONFIGURED")"
@@ -1089,7 +1122,7 @@ print_summary() {
   printf '  状态文件：%s\n' "$DONE_MARKER"
 
   if [[ "$AUTHORIZED_KEYS_INSTALLED" != "1" ]]; then
-    printf '\n未发现 root/hollow authorized_keys，SSH 登录策略保持原状。\n'
+    printf '\n未发现 root/%s/现有登录用户 authorized_keys，SSH 登录策略保持原状。\n' "$BOOTSTRAP_USER"
   fi
 }
 

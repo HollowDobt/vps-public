@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Debian 13 基础配置校验脚本。
 #
-# 校验目标与 debian13-bootstrap.sh 保持一致：系统版本、hollow 用户、
+# 校验目标与 debian13-bootstrap.sh 保持一致：系统版本、BOOTSTRAP_USER 用户、
 # SSH、sudo、UFW、fail2ban、自动安全更新、chrony、locale、timezone、
 # BBR、swapfile、受管状态文件和中断恢复标记。
 #
@@ -81,8 +81,8 @@ ITEM_LIST=()
 DETAIL_LIST=()
 ROOT_KEYS_PRESENT=0
 ROOT_KEYS_VALID=0
-HOLLOW_KEYS_PRESENT=0
-HOLLOW_KEYS_VALID=0
+USER_KEYS_PRESENT=0
+USER_KEYS_VALID=0
 
 log_location() {
   hostname 2>/dev/null || printf 'unknown'
@@ -270,19 +270,8 @@ sshd_value() {
   awk -v key="$key" '$1 == key { print $2; exit }'
 }
 
-sshd_allow_users_exact_root_hollow() {
-  awk '
-    $1 == "allowusers" {
-      for (i = 2; i <= NF; i++) {
-        if ($i == "root") root = 1
-        else if ($i == "hollow") hollow = 1
-        else extra = 1
-      }
-    }
-    END {
-      exit (root && hollow && !extra) ? 0 : 1
-    }
-  '
+managed_sshd_has_allowusers() {
+  [[ -r "$SSHD_DROPIN" ]] && grep -Eiq '^[[:space:]]*AllowUsers[[:space:]]+' "$SSHD_DROPIN"
 }
 
 bool_enabled() {
@@ -333,16 +322,17 @@ check_authorized_keys_user() {
     add_result FAIL "$label authorized_keys" "缺少或为空：$auth_keys"
   fi
 
-  case "$user" in
-    root)
-      ROOT_KEYS_PRESENT=$present
-      ROOT_KEYS_VALID=$valid
-      ;;
-    hollow)
-      HOLLOW_KEYS_PRESENT=$present
-      HOLLOW_KEYS_VALID=$valid
-      ;;
-  esac
+  if [[ "$user" == "root" ]]; then
+    ROOT_KEYS_PRESENT=$present
+    ROOT_KEYS_VALID=$valid
+    if [[ "$VERIFY_USER" == "root" ]]; then
+      USER_KEYS_PRESENT=$present
+      USER_KEYS_VALID=$valid
+    fi
+  elif [[ "$user" == "$VERIFY_USER" ]]; then
+    USER_KEYS_PRESENT=$present
+    USER_KEYS_VALID=$valid
+  fi
 
   return 0
 }
@@ -558,7 +548,7 @@ check_sudoers() {
   local expect="$VERIFY_SUDO_NOPASSWD"
 
   if [[ "$expect" == "auto" ]]; then
-    if [[ "$ROOT_KEYS_VALID" == "1" && "$HOLLOW_KEYS_VALID" == "1" ]]; then
+    if [[ "$ROOT_KEYS_VALID" == "1" && "$USER_KEYS_VALID" == "1" ]]; then
       expect="1"
     else
       expect="0"
@@ -593,7 +583,9 @@ check_sshd() {
   if [[ ! -r "$SSHD_DROPIN" ]]; then
     add_result FAIL "SSH drop-in" "缺少或不可读：$SSHD_DROPIN"
   else
-    if grep -qx "Port ${VERIFY_SSH_PORT}" "$SSHD_DROPIN" && grep -qx 'MaxAuthTries 3' "$SSHD_DROPIN"; then
+    if managed_sshd_has_allowusers; then
+      add_result FAIL "SSH drop-in" "受管配置不允许写 AllowUsers"
+    elif grep -qx "Port ${VERIFY_SSH_PORT}" "$SSHD_DROPIN" && grep -qx 'MaxAuthTries 3' "$SSHD_DROPIN"; then
       add_result OK "SSH drop-in" "$SSHD_DROPIN"
     else
       add_result FAIL "SSH drop-in" "端口或 MaxAuthTries 不符合预期"
@@ -614,10 +606,10 @@ check_sshd() {
     add_result FAIL "SSH 端口" "当前 ${value:-unknown}，预期 $VERIFY_SSH_PORT"
   fi
 
-  if [[ "$ROOT_KEYS_PRESENT" == "0" && "$HOLLOW_KEYS_PRESENT" == "0" ]]; then
-    add_result SKIP "SSH 登录策略" "未配置 root/hollow authorized_keys"
-  elif [[ "$ROOT_KEYS_VALID" != "1" || "$HOLLOW_KEYS_VALID" != "1" ]]; then
-    add_result FAIL "SSH 登录策略" "root/hollow authorized_keys 未同时可用"
+  if [[ "$ROOT_KEYS_PRESENT" == "0" && "$USER_KEYS_PRESENT" == "0" ]]; then
+    add_result SKIP "SSH 登录策略" "未配置 root/${VERIFY_USER} authorized_keys"
+  elif [[ "$ROOT_KEYS_VALID" != "1" || "$USER_KEYS_VALID" != "1" ]]; then
+    add_result FAIL "SSH 登录策略" "root/${VERIFY_USER} authorized_keys 未同时可用"
   elif [[ "$VERIFY_SSH_LOCKDOWN" == "0" ]]; then
     add_result OK "SSH 登录策略" "当前期望为保留系统默认登录策略"
   else
@@ -641,8 +633,8 @@ check_sshd() {
       "$pubkey_auth" == "yes" &&
       "$auth_methods" == "publickey" &&
       "$max_auth" == "3" ]] &&
-      sshd_allow_users_exact_root_hollow <<<"$cfg"; then
-      add_result OK "SSH 登录策略" "AllowUsers root hollow；仅 publickey"
+      ! managed_sshd_has_allowusers; then
+      add_result OK "SSH 登录策略" "未写 AllowUsers；仅 publickey"
     else
       add_result FAIL "SSH 登录策略" "permitroot=$permit_root password=$password_auth kbd=$kbd_auth pubkey=$pubkey_auth methods=$auth_methods maxauth=$max_auth"
     fi
@@ -992,7 +984,7 @@ main() {
   check_package_state
   check_user
   check_authorized_keys_user root "root"
-  check_authorized_keys_user hollow "hollow"
+  check_authorized_keys_user "$VERIFY_USER" "$VERIFY_USER"
   check_sudoers
   check_sshd
   check_ufw
