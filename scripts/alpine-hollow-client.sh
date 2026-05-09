@@ -81,7 +81,7 @@ usage() {
 
 常用配置：
   VPS_NODE_NAME=alpine-edge-1
-  HEADSCALE_SERVER_URL=https://headscale.hlwdot.com
+  HEADSCALE_SERVER_URL=https://headscale.example.com
   HEADSCALE_AUTHKEY=tskey-auth-...
   HOLLOW_NET_IFACE=hollow-net
   ALPINE_TAILSCALE_INSTALL_SOURCE=auto
@@ -180,7 +180,6 @@ validate_input() {
   case "$VPS_NODE_NAME" in
     *..*) die "VPS_NODE_NAME 不能包含连续的点。" ;;
   esac
-  HEADSCALE_CLIENT_HOSTNAME="$VPS_NODE_NAME"
 
   case "${HEADSCALE_SERVER_URL}" in
     http://*|https://*) ;;
@@ -233,10 +232,9 @@ require_alpine() {
 
 apply_defaults() {
   VPS_NODE_NAME="${VPS_NODE_NAME:-}"
-  HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-https://headscale.hlwdot.com}"
+  HEADSCALE_SERVER_URL="${HEADSCALE_SERVER_URL:-auto}"
   HEADSCALE_SERVER_HOSTNAME="${HEADSCALE_SERVER_HOSTNAME:-}"
   HEADSCALE_AUTHKEY="${HEADSCALE_AUTHKEY:-}"
-  HEADSCALE_CLIENT_HOSTNAME="$VPS_NODE_NAME"
   HEADSCALE_ACCEPT_DNS="${HEADSCALE_ACCEPT_DNS:-true}"
   HEADSCALE_ADVERTISE_ROUTES="${HEADSCALE_ADVERTISE_ROUTES:-}"
   HEADSCALE_ENABLE_TS_SSH="${HEADSCALE_ENABLE_TS_SSH:-0}"
@@ -265,13 +263,13 @@ apply_defaults() {
   ALPINE_TAILSCALE_UP_TIMEOUT_SEC="${ALPINE_TAILSCALE_UP_TIMEOUT_SEC:-120}"
 
   case "$HEADSCALE_SERVER_URL" in
-    auto|https://headscale.example.com|http://headscale.example.com)
+    ''|auto|https://headscale.example.com|http://headscale.example.com)
       if [ -n "$HEADSCALE_SERVER_HOSTNAME" ]; then
         HEADSCALE_SERVER_URL="https://${HEADSCALE_SERVER_HOSTNAME}"
       elif [ -n "${CLOUDFLARE_ZONE:-}" ]; then
         HEADSCALE_SERVER_URL="https://headscale.$(printf '%s' "$CLOUDFLARE_ZONE" | sed 's/[.]$//')"
       else
-        HEADSCALE_SERVER_URL="https://headscale.hlwdot.com"
+        die "HEADSCALE_SERVER_URL=auto 时需要设置 HEADSCALE_SERVER_HOSTNAME 或 CLOUDFLARE_ZONE。"
       fi
       ;;
   esac
@@ -511,7 +509,7 @@ EOF
   cat >"$HOLLOW_OPENRC_INIT" <<'EOF'
 #!/sbin/openrc-run
 
-name="hollow-tailscaled"
+name="${RC_SVCNAME:-hollow-tailscaled}"
 description="HlwDot tailscaled for Headscale network"
 supervisor="${HOLLOW_TAILSCALED_SUPERVISOR:-supervise-daemon}"
 command="${HOLLOW_TAILSCALED_BIN:-/usr/sbin/tailscaled}"
@@ -1173,7 +1171,7 @@ run_tailscale_up() {
   if [ -n "$HEADSCALE_AUTHKEY" ] && { [ "$already_up" != 1 ] || [ "$HEADSCALE_RESET" = 1 ]; }; then
     set -- "$@" --auth-key "$HEADSCALE_AUTHKEY"
   fi
-  [ -n "$HEADSCALE_CLIENT_HOSTNAME" ] && set -- "$@" --hostname "$HEADSCALE_CLIENT_HOSTNAME"
+  set -- "$@" --hostname "$VPS_NODE_NAME"
   if [ -n "$HEADSCALE_ADVERTISE_ROUTES" ]; then
     set -- "$@" --advertise-routes "$HEADSCALE_ADVERTISE_ROUTES"
   elif { [ "$ALPINE_SPLIT_DIRECTION" = inbound ] || [ "$ALPINE_SPLIT_DIRECTION" = both ]; } && [ -n "$ALPINE_SPLIT_ROUTE_CIDRS" ]; then
@@ -1239,7 +1237,7 @@ persist_tailnet_state() {
 print_summary() {
   printf '\nAlpine Headscale 网络接入完成。\n'
   printf '  login-server：%s\n' "$HEADSCALE_SERVER_URL"
-  printf '  hostname：%s\n' "$HEADSCALE_CLIENT_HOSTNAME"
+  printf '  hostname：%s\n' "$VPS_NODE_NAME"
   printf '  网卡：%s\n' "$HOLLOW_NET_IFACE"
   tailscale status --self 2>/dev/null || true
   if [ -n "$HEADSCALE_ADVERTISE_ROUTES" ]; then

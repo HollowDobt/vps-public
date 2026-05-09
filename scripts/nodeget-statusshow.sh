@@ -1971,7 +1971,7 @@ self_test_names() {
   NODEGET_HOLLOW_NAME_ALIASES="${NODEGET_HOLLOW_NAME_ALIASES:-center:CNETER}"
   cases='server999.center=CNETER-999
 server3.headscale=HEADSCALE-3
-server4.net=NET-4'
+server4.edge=EDGE-4'
   printf '%s\n' "$cases" | while IFS='=' read -r input expected; do
     actual=$(hollow_display_name_from_node_name "$input")
     [ "$actual" = "$expected" ] || die "节点名解析失败：$input -> $actual，期望 $expected"
@@ -2059,21 +2059,22 @@ self_test_menu() {
   [ -r "$menu_file" ] || return 0
   counts=$(
     awk '
-      /^MENU_LABELS=/{a="labels"}
-      /^MENU_GROUPS=/{a="groups"}
-      /^MENU_HINTS=/{a="hints"}
-      /^MENU_KEYS=/{a="keys"}
-      /^MENU_ACTIONS=/{a="actions"}
+      /^MENU_LABELS=\(/ { a = "labels"; next }
+      /^MENU_OS_GROUPS=\(/ { a = "os_groups"; next }
+      /^MENU_SUBGROUPS=\(/ { a = "subgroups"; next }
+      /^MENU_HINTS=\(/ { a = "hints"; next }
+      /^MENU_DISPLAY_ORDER=\(/ { n = gsub(/[0-9]+/, "&"); c["display_order"] = n; a = ""; next }
+      /^MENU_KEYS=/ { n = gsub(/"[^"]+"/, "&"); c["keys"] = n; a = ""; next }
+      /^MENU_ACTIONS=/ { n = gsub(/"[^"]+"/, "&"); c["actions"] = n; a = ""; next }
       {
+        if (a && $0 ~ /^\)/) { a = ""; next }
         if (a && $0 ~ /^  "/) c[a]++
-        if ($0 ~ /^MENU_KEYS=/) { n=gsub(/"[^"]+"/,"&"); c["keys"]=n }
-        if ($0 ~ /^MENU_ACTIONS=/) { n=gsub(/"[^"]+"/,"&"); c["actions"]=n }
       }
-      END { print c["labels"], c["groups"], c["hints"], c["keys"], c["actions"] }
+      END { print c["labels"], c["os_groups"], c["subgroups"], c["hints"], c["display_order"], c["keys"], c["actions"] }
     ' "$menu_file"
   )
   set -- $counts
-  [ "$1" = "$2" ] && [ "$1" = "$3" ] && [ "$1" = "$4" ] && [ "$1" = "$5" ] || die "菜单数组长度不一致：$counts"
+  [ "$1" = "$2" ] && [ "$1" = "$3" ] && [ "$1" = "$4" ] && [ "$1" = "$5" ] && [ "$1" = "$6" ] && [ "$1" = "$7" ] || die "菜单数组长度不一致：$counts"
   grep -q 'nodeget-statusshow' "$menu_file" || die "菜单缺少 nodeget-statusshow 动作。"
   log "自检通过：vps-menu 选项对齐。"
 }
@@ -2085,21 +2086,21 @@ self_test_inventory() {
   cat >"$status_json" <<'EOF'
 {
   "Self": {
-    "HostName": "server4.net",
-    "DNSName": "server4.net.net.hlwdot.com.",
+    "HostName": "server4.edge",
+    "DNSName": "server4.edge.net.example.invalid.",
     "TailscaleIPs": ["100.64.0.4"],
     "Online": true
   },
   "Peer": {
     "peer-999": {
       "HostName": "server999.center",
-      "DNSName": "server999.center.net.hlwdot.com.",
+      "DNSName": "server999.center.net.example.invalid.",
       "TailscaleIPs": ["100.64.0.2"],
       "Online": true
     },
     "peer-3": {
       "HostName": "server3",
-      "DNSName": "server3.headscale.net.hlwdot.com.",
+      "DNSName": "server3.headscale.net.example.invalid.",
       "TailscaleIPs": ["100.64.0.3"],
       "Online": false
     }
@@ -2111,11 +2112,11 @@ EOF
     HOLLOW_JSON="$out_json" \
     TAILSCALE_STATUS_JSON_FILE="$status_json" \
     NODEGET_HOLLOW_SYNC_ONCE=1 \
-    NODEGET_HOLLOW_DNS_SUFFIXES="net.hlwdot.com,hlwdot.com" \
+    NODEGET_HOLLOW_DNS_SUFFIXES="net.example.invalid,example.invalid" \
     NODEGET_HOLLOW_NAME_ALIASES="center:CNETER" \
     sh "$HOLLOW_SYNC_SCRIPT"
   jq -e '
-    ([.nodes[].name] | sort) == (["CNETER-999", "HEADSCALE-3", "NET-4"] | sort) and
+    ([.nodes[].name] | sort) == (["CNETER-999", "HEADSCALE-3", "EDGE-4"] | sort) and
     ([.nodes[] | select(.ip != null)] | length) == 0 and
     (.nodes[] | select(.name == "HEADSCALE-3") | .online) == false
   ' "$out_json" >/dev/null || die "hollow-net inventory 自检失败。"

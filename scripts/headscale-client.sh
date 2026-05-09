@@ -73,11 +73,6 @@ resolve_server_url() {
   esac
 }
 
-apply_defaults() {
-  HEADSCALE_CLIENT_HOSTNAME="$VPS_NODE_NAME"
-  K3S_NODE_NAME="$VPS_NODE_NAME"
-}
-
 persist_client_config() {
   persist_node_identity_defaults
   persist_env_value HEADSCALE_SERVER_URL "$HEADSCALE_SERVER_URL"
@@ -224,9 +219,7 @@ run_tailscale_up() {
   if [[ -n "$HEADSCALE_AUTHKEY" ]]; then
     args+=(--auth-key "$HEADSCALE_AUTHKEY")
   fi
-  if [[ -n "$HEADSCALE_CLIENT_HOSTNAME" ]]; then
-    args+=(--hostname "$HEADSCALE_CLIENT_HOSTNAME")
-  fi
+  args+=(--hostname "$VPS_NODE_NAME")
   if [[ -n "$HEADSCALE_ADVERTISE_ROUTES" ]]; then
     args+=(--advertise-routes "$HEADSCALE_ADVERTISE_ROUTES")
   fi
@@ -283,7 +276,7 @@ persist_tailnet_state() {
 print_summary() {
   printf '\nHeadscale 接入完成。\n'
   printf '  login-server：%s\n' "$HEADSCALE_SERVER_URL"
-  printf '  hostname：%s\n' "${HEADSCALE_CLIENT_HOSTNAME:-$(hostname 2>/dev/null || printf 'unknown')}"
+  printf '  hostname：%s\n' "$VPS_NODE_NAME"
   printf '  网卡：%s\n' "$HOLLOW_NET_IFACE"
   tailscale status --self 2>/dev/null || true
 }
@@ -292,7 +285,6 @@ main() {
   parse_noarg_or_help "$@"
   prepare_vps_run
   resolve_server_url
-  apply_defaults
   validate_input
   begin_run
   persist_env_file

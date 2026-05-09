@@ -103,7 +103,6 @@ load_bootstrap_env
 
 VPS_NODE_NAME="${VPS_NODE_NAME:-}"
 BOOTSTRAP_USER="${BOOTSTRAP_USER:-hollow}"
-BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
 BOOTSTRAP_TIMEZONE="${BOOTSTRAP_TIMEZONE:-Asia/Shanghai}"
 BOOTSTRAP_LOCALE="${BOOTSTRAP_LOCALE:-en_US.UTF-8}"
 BOOTSTRAP_EXTRA_LOCALES="${BOOTSTRAP_EXTRA_LOCALES:-zh_CN.UTF-8}"
@@ -268,13 +267,27 @@ validate_auto_bool() {
   esac
 }
 
+hostname_short_name() {
+  printf '%s\n' "${1%%.*}"
+}
+
+hostname_aliases() {
+  full_name="$1"
+  short_name=$(hostname_short_name "$full_name")
+
+  if [ "$short_name" = "$full_name" ]; then
+    printf '%s\n' "$full_name"
+  else
+    printf '%s %s\n' "$full_name" "$short_name"
+  fi
+}
+
 validate_input() {
   [ -n "$VPS_NODE_NAME" ] || die "必须设置 VPS_NODE_NAME。"
   printf '%s\n' "$VPS_NODE_NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$' || die "VPS_NODE_NAME 格式不合法。"
   case "$VPS_NODE_NAME" in
     *..*) die "VPS_NODE_NAME 不能包含连续的点。" ;;
   esac
-  BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
 
   case "$BOOTSTRAP_USER" in
     ''|*[!a-z_0-9-]*|-*) die "BOOTSTRAP_USER 必须是简单的小写 Linux 用户名。" ;;
@@ -282,14 +295,6 @@ validate_input() {
 
   is_uint "$BOOTSTRAP_SSH_PORT" || die "BOOTSTRAP_SSH_PORT 必须是数字。"
   [ "$BOOTSTRAP_SSH_PORT" -ge 1 ] && [ "$BOOTSTRAP_SSH_PORT" -le 65535 ] || die "BOOTSTRAP_SSH_PORT 必须在 1 到 65535 之间。"
-
-  if [ -n "$BOOTSTRAP_HOSTNAME" ]; then
-    printf '%s\n' "$BOOTSTRAP_HOSTNAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$' || die "BOOTSTRAP_HOSTNAME 格式不合法。"
-    case "$BOOTSTRAP_HOSTNAME" in
-      *..*) die "BOOTSTRAP_HOSTNAME 不能包含连续的点。" ;;
-    esac
-  fi
-
   case "$BOOTSTRAP_TIMEZONE" in
     /*|*..*) die "BOOTSTRAP_TIMEZONE 不能是绝对路径或包含 ..。" ;;
   esac
@@ -529,31 +534,71 @@ install_packages() {
 }
 
 configure_hostname() {
-  [ -n "$BOOTSTRAP_HOSTNAME" ] || return 0
+  [ -n "$VPS_NODE_NAME" ] || return 0
 
-  log "设置主机名：$BOOTSTRAP_HOSTNAME"
-  printf '%s\n' "$BOOTSTRAP_HOSTNAME" >/etc/hostname
-  hostname "$BOOTSTRAP_HOSTNAME" || true
-
+  hostname_alias_list=$(hostname_aliases "$VPS_NODE_NAME")
+  temp_hostname=$(mktemp_managed)
   temp_hosts=$(mktemp_managed)
+
+  log "设置主机名：$VPS_NODE_NAME"
+  printf '%s\n' "$VPS_NODE_NAME" >"$temp_hostname"
+  atomic_install_file "$temp_hostname" /etc/hostname 0644 root root
+
   if [ -f /etc/hosts ]; then
-    awk -v host="$BOOTSTRAP_HOSTNAME" '
-      BEGIN { updated = 0 }
-      /^[[:space:]]*#/ { print; next }
-      /^127\.0\.1\.1[[:space:]]+/ {
-        print "127.0.1.1\t" host
-        updated = 1
-        next
-      }
-      { print }
-      END {
-        if (!updated) print "127.0.1.1\t" host
-      }
+    awk '
+      /^# BEGIN hlwdot bootstrap hostname$/ { skip = 1; next }
+      /^# END hlwdot bootstrap hostname$/ { skip = 0; next }
+      $1 == "127.0.1.1" { next }
+      !skip { print }
     ' /etc/hosts >"$temp_hosts"
   else
-    printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n' "$BOOTSTRAP_HOSTNAME" >"$temp_hosts"
+    : >"$temp_hosts"
   fi
+  {
+    printf '# BEGIN hlwdot bootstrap hostname\n'
+    printf '127.0.0.1\tlocalhost localhost.localdomain %s\n' "$hostname_alias_list"
+    printf '::1\tlocalhost localhost.localdomain ip6-localhost ip6-loopback %s\n' "$hostname_alias_list"
+    printf '# END hlwdot bootstrap hostname\n'
+  } >>"$temp_hosts"
   atomic_install_file "$temp_hosts" /etc/hosts 0644 root root
+
+  rc-update add hostname boot >/dev/null 2>&1 || true
+  if rc-service hostname restart >/dev/null 2>&1; then
+    :
+  elif hostname -F /etc/hostname >/dev/null 2>&1; then
+    :
+  elif hostname "$VPS_NODE_NAME" >/dev/null 2>&1; then
+    :
+  else
+    die "无法把当前 Alpine 主机名设置为 $VPS_NODE_NAME；请检查容器是否允许 sethostname。"
+  fi
+
+  current_hostname=$(hostname 2>/dev/null || true)
+  if [ "$current_hostname" != "$VPS_NODE_NAME" ]; then
+    die "当前主机名仍为 ${current_hostname:-unknown}，预期 $VPS_NODE_NAME。"
+  fi
+
+  if command_exists getent; then
+    if ! getent hosts "$VPS_NODE_NAME" >/dev/null 2>&1; then
+      die "/etc/hosts 未能解析主机名：$VPS_NODE_NAME"
+    fi
+  else
+    if ! awk -v host="$VPS_NODE_NAME" '
+      /^[[:space:]]*#/ { next }
+      {
+        for (i = 2; i <= NF; i++) {
+          if ($i == host) {
+            found = 1
+          }
+        }
+      }
+      END {
+        exit found ? 0 : 1
+      }
+    ' /etc/hosts; then
+      die "/etc/hosts 未能解析主机名：$VPS_NODE_NAME"
+    fi
+  fi
 }
 
 configure_timezone() {

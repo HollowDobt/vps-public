@@ -59,7 +59,6 @@ apply_tailnet_defaults() {
   local tailnet_ip
 
   tailnet_ip="$(require_tailnet_ready)"
-  K3S_NODE_NAME="$VPS_NODE_NAME"
   [[ -n "$K3S_NODE_IP" ]] || K3S_NODE_IP="$tailnet_ip"
   [[ -n "$K3S_FLANNEL_IFACE" ]] || K3S_FLANNEL_IFACE="$HOLLOW_NET_IFACE"
   [[ -n "$K3S_UFW_INTERFACE" ]] || K3S_UFW_INTERFACE="$HOLLOW_NET_IFACE"
@@ -94,11 +93,9 @@ write_k3s_config() {
     printf 'token: '
     yaml_quote "$K3S_TOKEN"
     printf '\n'
-    if [[ -n "$K3S_NODE_NAME" ]]; then
-      printf 'node-name: '
-      yaml_quote "$K3S_NODE_NAME"
-      printf '\n'
-    fi
+    printf 'node-name: '
+    yaml_quote "$VPS_NODE_NAME"
+    printf '\n'
     if [[ -n "$K3S_NODE_IP" ]]; then
       printf 'node-ip: '
       yaml_quote "$K3S_NODE_IP"

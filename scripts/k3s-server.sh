@@ -69,7 +69,6 @@ apply_tailnet_defaults() {
   local public_ip
 
   tailnet_ip="$(require_tailnet_ready)"
-  K3S_NODE_NAME="$VPS_NODE_NAME"
   [[ -n "$K3S_NODE_IP" ]] || K3S_NODE_IP="$tailnet_ip"
   [[ -n "$K3S_ADVERTISE_ADDRESS" ]] || K3S_ADVERTISE_ADDRESS="$tailnet_ip"
   [[ -n "$K3S_FLANNEL_IFACE" ]] || K3S_FLANNEL_IFACE="$HOLLOW_NET_IFACE"
@@ -78,7 +77,7 @@ apply_tailnet_defaults() {
   host_fqdn="$(hostname -f 2>/dev/null || true)"
   public_ip="$(current_public_ipv4 2>/dev/null || true)"
 
-  append_tls_san "$K3S_NODE_NAME"
+  append_tls_san "$VPS_NODE_NAME"
   append_tls_san "$host_fqdn"
   append_tls_san "$K3S_NODE_IP"
   append_tls_san "$K3S_ADVERTISE_ADDRESS"
@@ -157,11 +156,9 @@ write_k3s_config() {
     if [[ "$K3S_CLUSTER_INIT" == "1" ]]; then
       printf 'cluster-init: true\n'
     fi
-    if [[ -n "$K3S_NODE_NAME" ]]; then
-      printf 'node-name: '
-      yaml_quote "$K3S_NODE_NAME"
-      printf '\n'
-    fi
+    printf 'node-name: '
+    yaml_quote "$VPS_NODE_NAME"
+    printf '\n'
     if [[ -n "$K3S_NODE_IP" ]]; then
       printf 'node-ip: '
       yaml_quote "$K3S_NODE_IP"

@@ -281,19 +281,10 @@ validate_vps_node_name() {
   [[ "$VPS_NODE_NAME" != *..* ]] || die "VPS_NODE_NAME 不能包含连续的点。"
 }
 
-normalize_identity_alias() {
-  local name="$1"
-
-  printf -v "$name" '%s' "$VPS_NODE_NAME"
-}
-
 normalize_node_identity_defaults() {
   [[ "$VPS_IDENTITY_DEFAULTS_USED" == "1" ]] || return 0
 
   validate_vps_node_name
-  normalize_identity_alias BOOTSTRAP_HOSTNAME
-  normalize_identity_alias HEADSCALE_CLIENT_HOSTNAME
-  normalize_identity_alias K3S_NODE_NAME
 }
 
 derive_node_identity_defaults() {

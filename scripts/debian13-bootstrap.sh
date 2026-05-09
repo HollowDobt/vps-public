@@ -98,7 +98,6 @@ load_bootstrap_env
 # 只有找到可用登录密钥并写入 root 与 BOOTSTRAP_USER 后，才会启用仅密钥 SSH 登录策略。
 VPS_NODE_NAME="${VPS_NODE_NAME:-}"
 BOOTSTRAP_USER="${BOOTSTRAP_USER:-hollow}"
-BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
 BOOTSTRAP_TIMEZONE="${BOOTSTRAP_TIMEZONE:-Asia/Shanghai}"
 BOOTSTRAP_LOCALE="${BOOTSTRAP_LOCALE:-en_US.UTF-8}"
 BOOTSTRAP_EXTRA_LOCALES="${BOOTSTRAP_EXTRA_LOCALES:-zh_CN.UTF-8}"
@@ -295,7 +294,6 @@ validate_input() {
   [[ -n "$VPS_NODE_NAME" ]] || die "必须设置 VPS_NODE_NAME。"
   [[ "$VPS_NODE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$ ]] || die "VPS_NODE_NAME 格式不合法。"
   [[ "$VPS_NODE_NAME" != *..* ]] || die "VPS_NODE_NAME 不能包含连续的点。"
-  BOOTSTRAP_HOSTNAME="$VPS_NODE_NAME"
 
   case "$BOOTSTRAP_USER" in
     '' | *[!a-z_0-9-]* | -*)
@@ -309,11 +307,6 @@ validate_input() {
       ;;
   esac
   ((BOOTSTRAP_SSH_PORT >= 1 && BOOTSTRAP_SSH_PORT <= 65535)) || die "BOOTSTRAP_SSH_PORT 必须在 1 到 65535 之间。"
-
-  if [[ -n "$BOOTSTRAP_HOSTNAME" ]]; then
-    [[ "$BOOTSTRAP_HOSTNAME" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$ ]] || die "BOOTSTRAP_HOSTNAME 格式不合法。"
-    [[ "$BOOTSTRAP_HOSTNAME" != *..* ]] || die "BOOTSTRAP_HOSTNAME 不能包含连续的点。"
-  fi
 
   [[ "$BOOTSTRAP_TIMEZONE" != /* && "$BOOTSTRAP_TIMEZONE" != *..* ]] || die "BOOTSTRAP_TIMEZONE 不能是绝对路径或包含 ..。"
   [[ "$BOOTSTRAP_TIMEZONE" =~ ^[A-Za-z0-9_+./-]+$ ]] || die "BOOTSTRAP_TIMEZONE 包含非法字符。"
@@ -513,16 +506,16 @@ run_apt() {
 configure_hostname() {
   local temp_hosts
 
-  [[ -n "$BOOTSTRAP_HOSTNAME" ]] || return 0
+  [[ -n "$VPS_NODE_NAME" ]] || return 0
 
-  log "设置主机名：$BOOTSTRAP_HOSTNAME"
-  hostnamectl set-hostname "$BOOTSTRAP_HOSTNAME"
+  log "设置主机名：$VPS_NODE_NAME"
+  hostnamectl set-hostname "$VPS_NODE_NAME"
 
   # Debian 常用 127.0.1.1 绑定本机 hostname；同步它可以减少 sudo、
   # 本地解析和服务启动时的 hostname 警告。
   if [[ -f /etc/hosts ]]; then
     temp_hosts="$(mktemp_managed)"
-    awk -v host="$BOOTSTRAP_HOSTNAME" '
+    awk -v host="$VPS_NODE_NAME" '
       BEGIN { updated = 0 }
       /^[[:space:]]*#/ { print; next }
       /^127\.0\.1\.1[[:space:]]+/ {
