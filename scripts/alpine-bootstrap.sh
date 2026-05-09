@@ -2,7 +2,7 @@
 # Alpine VPS 初装后的首次基础配置脚本。
 #
 # Alpine/OpenRC 环境的基础初始化：hollow 登录、SSH 公钥、安全防护、
-# 自动 apk 更新、BBR、swapfile/zram fallback，以及中断后的可重复执行恢复。
+# 自动 apk 更新、BBR、LXC 宿主机 swap 管理，以及中断后的可重复执行恢复。
 #
 # 运行方式：
 #   sudo sh scripts/alpine-bootstrap.sh
@@ -18,9 +18,12 @@
 #   - BOOTSTRAP_ENABLE_UFW=1 在 Alpine 下启用受管 iptables 防火墙。
 #   - HOLLOW_NET_IFACE 为 hollow-net 网卡名，防火墙默认放行该网卡入站。
 #   - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 写入 daily apk upgrade 并启用 crond。
-#   - BOOTSTRAP_SWAP_SIZE=auto 时，swapfile 所在文件系统可用空间小于或等于 1GB 创建 128MB；
+#   - ALPINE_LXC_MODE=1 时按 LXC 容器执行：swap 由宿主机/cgroup 管理，
+#     脚本不在容器内创建 swapfile/zram。默认值为 1。
+#   - ALPINE_LXC_MODE=0 时按 Alpine VM/裸机执行：
+#     BOOTSTRAP_SWAP_SIZE=auto 在 swapfile 所在文件系统可用空间小于或等于 1GB 时创建 128MB；
 #     否则 MemTotal 小于或等于 2GB 创建约等于 MemTotal 的 swapfile，MemTotal 大于 2GB 创建 4GB。
-#   - swapfile 因底层文件系统含洞或不支持而无法启用时，脚本改用 Alpine zram-init swap。
+#   - 非 LXC 环境里 swapfile 因底层文件系统含洞或不支持而无法启用时，脚本改用 Alpine zram-init swap。
 #   - ALPINE_ENABLE_COMMUNITY_REPO=1 时启用 community 仓库；
 #     ALPINE_COMMUNITY_REPO_URL=auto 时按 main 仓库推导，推导失败时使用官方 CDN。
 
@@ -72,6 +75,7 @@ HOLLOW_NET_IFACE="${HOLLOW_NET_IFACE:-hollow-net}"
 BOOTSTRAP_ENABLE_SWAP="${BOOTSTRAP_ENABLE_SWAP:-1}"
 BOOTSTRAP_SWAPFILE="${BOOTSTRAP_SWAPFILE:-/swapfile}"
 BOOTSTRAP_SWAP_SIZE="${BOOTSTRAP_SWAP_SIZE:-auto}"
+ALPINE_LXC_MODE="${ALPINE_LXC_MODE:-1}"
 ALPINE_ENABLE_COMMUNITY_REPO="${ALPINE_ENABLE_COMMUNITY_REPO:-1}"
 ALPINE_COMMUNITY_REPO_URL="${ALPINE_COMMUNITY_REPO_URL:-auto}"
 
@@ -104,6 +108,21 @@ die() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+is_lxc_container() {
+  case "$ALPINE_LXC_MODE" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+
+  if [ -r /proc/1/environ ] && tr '\000' '\n' </proc/1/environ 2>/dev/null | grep -Eq '^container=(lxc|lxc-libvirt)$'; then
+    return 0
+  fi
+  if [ -r /proc/1/cgroup ] && grep -Eqa '(^|/)(lxc|lxc\.payload|machine.slice/.+\.scope)' /proc/1/cgroup; then
+    return 0
+  fi
+  return 1
 }
 
 is_uint() {
@@ -163,13 +182,17 @@ usage() {
   BOOTSTRAP_ENABLE_SWAP=1
   BOOTSTRAP_SWAPFILE=/swapfile
   BOOTSTRAP_SWAP_SIZE=auto             # auto、0、1024M、2G
+  ALPINE_LXC_MODE=1                    # 1、0、auto
+  ALPINE_ENABLE_COMMUNITY_REPO=1
+  ALPINE_COMMUNITY_REPO_URL=auto
 
 说明：
   - 仅支持 Alpine Linux + OpenRC。
   - BOOTSTRAP_SSH_LOCKDOWN=auto 时，只有找到可用登录密钥并写入 root 与 BOOTSTRAP_USER 后才启用仅密钥登录。
   - BOOTSTRAP_ENABLE_UNATTENDED_UPGRADES=1 会写入 daily periodic apk upgrade，并启用 crond。
   - BOOTSTRAP_ENABLE_UFW=1 会放行 SSH 端口和 HOLLOW_NET_IFACE 网卡，其余入站默认拒绝。
-  - swapfile 默认开启；auto 在磁盘可用空间小于或等于 1GB 时使用 128M，否则按 MemTotal 选择自身内存大小或 4G。
+  - ALPINE_LXC_MODE=1 时不在容器内配置 swapfile/zram；swap 由宿主机/cgroup 管理。
+  - ALPINE_LXC_MODE=0 时才在 Alpine VM/裸机内配置 swapfile；auto 在磁盘可用空间小于或等于 1GB 时使用 128M，否则按 MemTotal 选择自身内存大小或 4G。
   - fstab 不设置 pri，使用系统默认 swap 优先级。
 EOF
 }
@@ -233,6 +256,7 @@ validate_input() {
   validate_bool BOOTSTRAP_FULL_UPGRADE "$BOOTSTRAP_FULL_UPGRADE"
   validate_bool BOOTSTRAP_ENABLE_BBR "$BOOTSTRAP_ENABLE_BBR"
   validate_bool BOOTSTRAP_ENABLE_SWAP "$BOOTSTRAP_ENABLE_SWAP"
+  validate_auto_bool ALPINE_LXC_MODE "$ALPINE_LXC_MODE"
   validate_bool ALPINE_ENABLE_COMMUNITY_REPO "$ALPINE_ENABLE_COMMUNITY_REPO"
 
   case "$HOLLOW_NET_IFACE" in
@@ -961,6 +985,29 @@ remove_fstab_swap_entry() {
   atomic_install_file "$temp_fstab" /etc/fstab 0644 root root
 }
 
+cleanup_lxc_swap_artifacts() {
+  stale_swap_path=''
+
+  if [ -f "$SWAP_IN_PROGRESS" ]; then
+    stale_swap_path=$(sed -n 's/^swapfile=//p' "$SWAP_IN_PROGRESS" | head -n 1)
+    if [ -n "$stale_swap_path" ]; then
+      safe_remove_managed_swapfile "$stale_swap_path" || warn "未能清理上次未完成的 swapfile：$stale_swap_path"
+      remove_fstab_swap_entry "$stale_swap_path"
+    fi
+    rm -f -- "$SWAP_IN_PROGRESS"
+    return 0
+  fi
+
+  if [ "$BOOTSTRAP_SWAPFILE" = /swapfile ] &&
+    [ -f /swapfile ] &&
+    ! is_swap_active /swapfile &&
+    swapfile_has_signature /swapfile; then
+    rm -f -- /swapfile
+    remove_fstab_swap_entry /swapfile
+    log "删除 Alpine LXC 中旧的受管 swapfile 残留：/swapfile"
+  fi
+}
+
 zram_swap_active() {
   [ -r /proc/swaps ] || return 1
   awk 'NR > 1 && $1 ~ /^\/dev\/zram[0-9]+$/ && $3 == "partition" { found = 1 } END { exit found ? 0 : 1 }' /proc/swaps
@@ -969,8 +1016,16 @@ zram_swap_active() {
 configure_zram_swap() {
   size_mb="$1"
   original_error="${2:-}"
-  temp_zram=$(mktemp_managed)
 
+  if is_lxc_container; then
+    cleanup_lxc_swap_artifacts
+    SWAP_BACKEND=lxc-host
+    SWAP_ACTIVE_TARGET=host-managed
+    log "检测到 LXC 容器，swap 由宿主机/cgroup 管理；不在容器内配置 zram。"
+    return 0
+  fi
+
+  temp_zram=$(mktemp_managed)
   warn "swapfile 无法在当前文件系统启用，改用 Alpine 官方 zram-init swap。原始错误：${original_error:-未知错误}"
   rm -f -- "$BOOTSTRAP_SWAPFILE"
   remove_fstab_swap_entry "$BOOTSTRAP_SWAPFILE"
@@ -1131,6 +1186,15 @@ configure_swapfile() {
   reserve_mb=256
 
   [ "$BOOTSTRAP_ENABLE_SWAP" = 1 ] || return 0
+
+  if is_lxc_container; then
+    SWAP_SIZE_MB=0
+    SWAP_BACKEND=lxc-host
+    SWAP_ACTIVE_TARGET=host-managed
+    cleanup_lxc_swap_artifacts
+    log "检测到 LXC 容器，swap 由宿主机/cgroup 管理；跳过容器内 swapfile/zram 配置。"
+    return 0
+  fi
 
   swap_dir=$(dirname "$BOOTSTRAP_SWAPFILE")
   mkdir -p "$swap_dir"
